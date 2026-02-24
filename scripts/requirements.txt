@@ -1,0 +1,5 @@
+# Requirements for Legal Lens document analysis scripts
+openai>=1.60.1
+python-dotenv>=1.0.0
+fpdf2>=2.8.5
+Pillow>=12.0.0
