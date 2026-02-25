@@ -2,7 +2,7 @@
  * AI client abstraction - supports both OpenAI (Azure) and Ollama backends.
  * Ported from scripts/ocr.py, scripts/translation.py, scripts/report.py
  */
-import { config } from './config';
+import { config, validateConfig } from './config';
 
 // ── Shared helpers ──────────────────────────────────────────────────────
 
@@ -87,6 +87,9 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
     max_tokens: maxTokens,
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
+
+  // Fail fast with a clear message if env vars are missing
+  validateConfig();
 
   let lastError: Error | null = null;
 
