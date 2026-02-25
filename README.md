@@ -66,3 +66,6 @@ The codebase is designed to be simple and maintainable:
 - **Consolidated types** in one file
 - **Minimal components** with focused responsibilities
 - **Clean API routes** with simplified error handling
+
+
+Pending README update changes for NextJS Vercel deployment
