@@ -137,7 +137,12 @@ export async function POST(request: NextRequest) {
       savedFiles.push(translationPath);
     }
 
-    return NextResponse.json({ saved: savedFiles });
+    const res = NextResponse.json({ saved: savedFiles });
+    // Warn callers that files on Vercel are ephemeral (/tmp is per-invocation)
+    if (isVercel) {
+      res.headers.set('X-Vercel-Warning', 'Files are ephemeral and will not persist between requests');
+    }
+    return res;
   } catch (error) {
     console.error('Save results error:', error);
     return NextResponse.json(

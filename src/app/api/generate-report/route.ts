@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateReport } from '@/lib/ai-client';
 
-// Allow up to 120s for report generation (largest prompt, most tokens)
-export const maxDuration = 120;
+// Allow up to 60s for report generation.
+// Vercel Hobby plan caps at 60s; upgrade to Pro for longer timeouts.
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   try {
