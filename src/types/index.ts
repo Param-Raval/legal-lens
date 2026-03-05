@@ -51,6 +51,11 @@ export interface FileInfo {
   size: number;
   type: string;
   file: File;
+  /**
+   * Private Vercel Blob URL created during client-side upload.
+   * Present when running on Vercel; undefined in local dev without blob env.
+   */
+  blobUrl?: string;
   /** Optional language hint set by user (ISO 639-1 code) */
   languageHint?: string;
   analysis?: OCRResult;

@@ -25,7 +25,6 @@ export async function POST(request: NextRequest) {
     const validatedResponse = DiscrepancySchema.parse(result);
     return NextResponse.json(validatedResponse);
   } catch (error) {
-    console.error('Discrepancy analysis error:', error);
     const message = error instanceof Error ? error.message : 'Analysis failed';
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -17,6 +17,7 @@ class AbortedError extends Error {
 
 export type PipelineStage =
   | 'idle'
+  | 'uploading'
   | 'analyzing'
   | 'translating'
   | 'generating-report'
@@ -134,7 +135,7 @@ export const useFiles = () => {
     []
   );
 
-  const uploadFiles = useCallback((fileArray: File[]) => {
+  const uploadFiles = useCallback(async (fileArray: File[]) => {
     const newFiles: FileInfo[] = fileArray.map(file => ({
       id: `${file.name}-${file.lastModified}`,
       name: file.name,
@@ -145,11 +146,49 @@ export const useFiles = () => {
     setFiles(newFiles);
     setError('');
     setReport(null);
-    setDiscrepancyCheck({
-      hasDiscrepancies: false,
-      summary: '',
-      isChecking: false,
-    });
+    setDiscrepancyCheck({ hasDiscrepancies: false, summary: '', isChecking: false });
+
+    // Upload each file directly to the private Vercel Blob store (client
+    // upload).  Raw document bytes never pass through a Vercel Function —
+    // only a short-lived token is generated server-side (/api/blob).
+    // The resulting blobUrl is fetched + deleted by /api/analyze on demand.
+    try {
+      setPipeline({
+        stage: 'uploading',
+        percent: 0,
+        message: `Uploading ${newFiles.length} file(s) to secure storage…`,
+      });
+
+      const { upload } = await import('@vercel/blob/client');
+
+      const results = await Promise.allSettled(
+        newFiles.map(async fileInfo => {
+          const blobPath = `sessions/${crypto.randomUUID()}/${fileInfo.name}`;
+          const blob = await upload(blobPath, fileInfo.file, {
+            access: 'private',
+            handleUploadUrl: '/api/blob',
+          });
+          return { id: fileInfo.id, blobUrl: blob.url };
+        })
+      );
+
+      const blobMap = new Map<string, string>();
+      for (const r of results) {
+        if (r.status === 'fulfilled') blobMap.set(r.value.id, r.value.blobUrl);
+      }
+
+      setFiles(newFiles.map(f => ({ ...f, blobUrl: blobMap.get(f.id) })));
+      setPipeline({ stage: 'idle', percent: 0, message: '' });
+    } catch (err) {
+      // Blob upload failed – files are kept in local state so the user can
+      // still proceed; API routes fall back to accepting raw file bytes.
+      setError(
+        `Secure upload warning: ${
+          err instanceof Error ? err.message : 'Could not reach secure storage'
+        }. You may still analyze documents.`
+      );
+      setPipeline({ stage: 'idle', percent: 0, message: '' });
+    }
   }, []);
 
   const setFileLanguage = useCallback((index: number, languageHint: string) => {
@@ -197,7 +236,11 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', file.file);
+        if (file.blobUrl) {
+          formData.append('blobUrl', file.blobUrl);
+        } else {
+          formData.append('file', file.file);
+        }
         if (file.languageHint) {
           formData.append('languageHint', file.languageHint);
         }
@@ -215,8 +258,11 @@ export const useFiles = () => {
 
         const analysis: OCRResult = await response.json();
 
+        // Clear blobUrl – the server deleted it from blob storage.
         setFiles(prev =>
-          prev.map((f, i) => (i === index ? { ...f, analysis } : f))
+          prev.map((f, i) =>
+            i === index ? { ...f, analysis, blobUrl: undefined } : f
+          )
         );
         // Save OCR result to disk
         saveResultsToDisk(file.name, analysis);
@@ -265,7 +311,11 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', files[index].file);
+        if (files[index].blobUrl) {
+          formData.append('blobUrl', files[index].blobUrl!);
+        } else {
+          formData.append('file', files[index].file);
+        }
         if (files[index].languageHint) {
           formData.append('languageHint', files[index].languageHint);
         }
@@ -285,8 +335,11 @@ export const useFiles = () => {
 
         const analysis: OCRResult = await response.json();
 
+        // Clear blobUrl – the server deleted it from blob storage.
         setFiles(prev =>
-          prev.map((f, i) => (i === index ? { ...f, analysis } : f))
+          prev.map((f, i) =>
+            i === index ? { ...f, analysis, blobUrl: undefined } : f
+          )
         );
         saveResultsToDisk(files[index].name, analysis);
         completed++;
@@ -344,7 +397,11 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', files[index].file);
+        if (files[index].blobUrl) {
+          formData.append('blobUrl', files[index].blobUrl!);
+        } else {
+          formData.append('file', files[index].file);
+        }
         if (files[index].languageHint) {
           formData.append('languageHint', files[index].languageHint);
         }
@@ -363,8 +420,9 @@ export const useFiles = () => {
         }
 
         const analysis: OCRResult = await response.json();
+        // Clear blobUrl – the server deleted it from blob storage.
         latestFiles = latestFiles.map((f, i) =>
-          i === index ? { ...f, analysis } : f
+          i === index ? { ...f, analysis, blobUrl: undefined } : f
         );
         setFiles(latestFiles as FileInfo[]);
         saveResultsToDisk(files[index].name, analysis);
@@ -418,13 +476,12 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', latestFiles[index].file);
         formData.append('targetLanguage', 'en');
         if (latestFiles[index].languageHint) {
           formData.append('languageHint', latestFiles[index].languageHint!);
         }
-        // Send OCR data so the API can use text-based translation
         if (latestFiles[index].analysis) {
+          // Text path – no file bytes needed.
           formData.append(
             'ocrText',
             (latestFiles[index].analysis as OCRResult).text || ''
@@ -440,6 +497,12 @@ export const useFiles = () => {
             'ocrLanguage',
             (latestFiles[index].analysis as OCRResult).document_language || ''
           );
+        } else if (latestFiles[index].blobUrl) {
+          // Vision path via private blob (translate before OCR).
+          formData.append('blobUrl', latestFiles[index].blobUrl!);
+        } else {
+          // Local dev fallback.
+          formData.append('file', latestFiles[index].file);
         }
 
         const response = await fetchWithRetry(
@@ -552,19 +615,24 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', file.file);
         formData.append('targetLanguage', 'en');
         if (file.languageHint) {
           formData.append('languageHint', file.languageHint);
         }
-        // Send OCR data so the API can use text-based translation
         if (file.analysis) {
+          // Text path – no file bytes needed.
           formData.append('ocrText', file.analysis.text || '');
           formData.append(
             'ocrFields',
             JSON.stringify(file.analysis.structured_data?.fields || [])
           );
           formData.append('ocrLanguage', file.analysis.document_language || '');
+        } else if (file.blobUrl) {
+          // Vision path via private blob (translate before OCR).
+          formData.append('blobUrl', file.blobUrl);
+        } else {
+          // Local dev fallback.
+          formData.append('file', file.file);
         }
 
         const response = await fetchWithRetry(
@@ -638,13 +706,12 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        formData.append('file', files[index].file);
         formData.append('targetLanguage', 'en');
         if (files[index].languageHint) {
           formData.append('languageHint', files[index].languageHint!);
         }
-        // Send OCR data so the API can use text-based translation
         if (files[index].analysis) {
+          // Text path – no file bytes needed.
           formData.append('ocrText', files[index].analysis!.text || '');
           formData.append(
             'ocrFields',
@@ -654,6 +721,12 @@ export const useFiles = () => {
             'ocrLanguage',
             files[index].analysis!.document_language || ''
           );
+        } else if (files[index].blobUrl) {
+          // Vision path via private blob (translate before OCR).
+          formData.append('blobUrl', files[index].blobUrl!);
+        } else {
+          // Local dev fallback.
+          formData.append('file', files[index].file);
         }
 
         const response = await fetchWithRetry(

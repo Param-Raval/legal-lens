@@ -144,7 +144,7 @@ export const ApplicationAnalyzer = ({
                 {pipeline.message}
               </span>
               <div className="flex items-center gap-2">
-                {isBusy && (
+                {isBusy && pipeline.stage !== 'uploading' && (
                   <Button
                     onClick={onStopProcessing}
                     variant="destructive"

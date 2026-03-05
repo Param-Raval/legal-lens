@@ -9,6 +9,11 @@ const OUTPUT_DIR = isVercel
   ? path.join(os.tmpdir(), 'output')
   : path.join(process.cwd(), 'output');
 
+// On a public Vercel deployment no document data is written to disk.
+// Files uploaded via Vercel Blob are already access-controlled and short-lived;
+// writing them again to /tmp would just create an unnecessary extra copy.
+const PERSISTENCE_DISABLED = isVercel;
+
 /**
  * Save OCR / translation results to disk.
  *
@@ -23,6 +28,10 @@ const OUTPUT_DIR = isVercel
 export async function POST(request: NextRequest) {
   try {
     const { clientName, fileName, ocr, translation } = await request.json();
+
+    if (PERSISTENCE_DISABLED) {
+      return NextResponse.json({ saved: [], persisted: false });
+    }
 
     if (!fileName) {
       return NextResponse.json(
@@ -137,14 +146,8 @@ export async function POST(request: NextRequest) {
       savedFiles.push(translationPath);
     }
 
-    const res = NextResponse.json({ saved: savedFiles });
-    // Warn callers that files on Vercel are ephemeral (/tmp is per-invocation)
-    if (isVercel) {
-      res.headers.set('X-Vercel-Warning', 'Files are ephemeral and will not persist between requests');
-    }
-    return res;
+    return NextResponse.json({ saved: savedFiles, persisted: true });
   } catch (error) {
-    console.error('Save results error:', error);
     return NextResponse.json(
       {
         error:

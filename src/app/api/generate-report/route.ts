@@ -17,10 +17,8 @@ export async function POST(request: NextRequest) {
     }
 
     const report = await generateReport(documents);
-    console.log('[report] Generated report for', documents.length, 'documents');
     return NextResponse.json(report);
   } catch (error) {
-    console.error('Report generation error:', error);
     const message =
       error instanceof Error ? error.message : 'Report generation failed';
     const isRateLimit = message.includes('Rate limited');
