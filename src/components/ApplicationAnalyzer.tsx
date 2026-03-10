@@ -25,6 +25,7 @@ interface ApplicationAnalyzerProps {
   isGeneratingReport: boolean;
   isAnalyzing: number | null;
   isTranslating: number | null;
+  isPdfExtracting: boolean;
   pipeline: PipelineProgress;
   onRunFullPipeline: () => void;
   onAnalyzeAll: () => void;
@@ -42,6 +43,7 @@ export const ApplicationAnalyzer = ({
   isGeneratingReport,
   isAnalyzing,
   isTranslating,
+  isPdfExtracting,
   pipeline,
   onRunFullPipeline,
   onAnalyzeAll,
@@ -64,13 +66,19 @@ export const ApplicationAnalyzer = ({
     f => !f.translation
   ).length;
 
-  const canAnalyze = imageFiles.length > analyzedCount && isAnalyzing === null;
-  const canTranslate = needsTranslation > 0 && isTranslating === null;
+  const canAnalyze =
+    imageFiles.length > analyzedCount &&
+    isAnalyzing === null &&
+    !isPdfExtracting;
+  const canTranslate =
+    needsTranslation > 0 && isTranslating === null && !isPdfExtracting;
   const canCheckDiscrepancies =
-    analyzedCount >= 2 && !discrepancyCheck.isChecking;
-  const canGenerateReport = analyzedCount >= 1 && !isGeneratingReport;
+    analyzedCount >= 2 && !discrepancyCheck.isChecking && !isPdfExtracting;
+  const canGenerateReport =
+    analyzedCount >= 1 && !isGeneratingReport && !isPdfExtracting;
 
   const isBusy =
+    isPdfExtracting ||
     isAnalyzing !== null ||
     isTranslating !== null ||
     isGeneratingReport ||
@@ -144,7 +152,7 @@ export const ApplicationAnalyzer = ({
                 {pipeline.message}
               </span>
               <div className="flex items-center gap-2">
-                {isBusy && pipeline.stage !== 'uploading' && (
+                {isBusy && (
                   <Button
                     onClick={onStopProcessing}
                     variant="destructive"
@@ -173,7 +181,8 @@ export const ApplicationAnalyzer = ({
           <Button
             onClick={onRunFullPipeline}
             disabled={
-              pipeline.stage !== 'idle' && pipeline.stage !== 'complete'
+              isPdfExtracting ||
+              (pipeline.stage !== 'idle' && pipeline.stage !== 'complete')
             }
             size="sm"
           >

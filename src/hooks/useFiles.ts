@@ -5,7 +5,10 @@ import {
   TranslationResult,
   DiscrepancyCheck,
   AnalysisReport,
+  DocumentGroup,
+  DocumentPage,
 } from '@/types';
+import { extractPdfPages } from '@/lib/pdf-extract';
 
 /** Sentinel error thrown when the user cancels processing. */
 class AbortedError extends Error {
@@ -17,7 +20,6 @@ class AbortedError extends Error {
 
 export type PipelineStage =
   | 'idle'
-  | 'uploading'
   | 'analyzing'
   | 'translating'
   | 'generating-report'
@@ -50,6 +52,7 @@ export const useFiles = () => {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [clientName, setClientName] = useState('Client');
   const [error, setError] = useState('');
+  const [isPdfExtracting, setIsPdfExtracting] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineProgress>({
     stage: 'idle',
     percent: 0,
@@ -135,73 +138,132 @@ export const useFiles = () => {
     []
   );
 
-  const uploadFiles = useCallback(async (fileArray: File[]) => {
-    const newFiles: FileInfo[] = fileArray.map(file => ({
-      id: `${file.name}-${file.lastModified}`,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      file,
-    }));
-    setFiles(newFiles);
+  const uploadFiles = useCallback((fileArray: File[]) => {
     setError('');
     setReport(null);
-    setDiscrepancyCheck({ hasDiscrepancies: false, summary: '', isChecking: false });
+    setDiscrepancyCheck({
+      hasDiscrepancies: false,
+      summary: '',
+      isChecking: false,
+    });
 
-    // Upload each file directly to the private Vercel Blob store (client
-    // upload).  Raw document bytes never pass through a Vercel Function —
-    // only a short-lived token is generated server-side (/api/blob).
-    // The resulting blobUrl is fetched + deleted by /api/analyze on demand.
-    try {
-      setPipeline({
-        stage: 'uploading',
-        percent: 0,
-        message: `Uploading ${newFiles.length} file(s) to secure storage…`,
-      });
-
-      const { upload } = await import('@vercel/blob/client');
-
-      const results = await Promise.allSettled(
-        newFiles.map(async fileInfo => {
-          const blobPath = `sessions/${crypto.randomUUID()}/${fileInfo.name}`;
-          const blob = await upload(blobPath, fileInfo.file, {
-            access: 'private',
-            handleUploadUrl: '/api/blob',
-          });
-          return { id: fileInfo.id, blobUrl: blob.url };
-        })
-      );
-
-      const blobMap = new Map<string, string>();
-      for (const r of results) {
-        if (r.status === 'fulfilled') blobMap.set(r.value.id, r.value.blobUrl);
+    // Separate PDFs from non-PDFs
+    const pdfs: File[] = [];
+    const nonPdfs: FileInfo[] = [];
+    for (const file of fileArray) {
+      if (
+        file.type === 'application/pdf' ||
+        file.name.toLowerCase().endsWith('.pdf')
+      ) {
+        pdfs.push(file);
+      } else {
+        nonPdfs.push({
+          id: `${file.name}-${file.lastModified}`,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          file,
+        });
       }
-
-      setFiles(newFiles.map(f => ({ ...f, blobUrl: blobMap.get(f.id) })));
-      setPipeline({ stage: 'idle', percent: 0, message: '' });
-    } catch (err) {
-      // Blob upload failed – files are kept in local state so the user can
-      // still proceed; API routes fall back to accepting raw file bytes.
-      setError(
-        `Secure upload warning: ${
-          err instanceof Error ? err.message : 'Could not reach secure storage'
-        }. You may still analyze documents.`
-      );
-      setPipeline({ stage: 'idle', percent: 0, message: '' });
     }
+
+    // Set non-PDF files immediately so the UI is responsive
+    setFiles(nonPdfs);
+
+    if (pdfs.length === 0) return;
+
+    // Extract PDF pages asynchronously
+    setIsPdfExtracting(true);
+    (async () => {
+      const warnings: string[] = [];
+      for (const pdf of pdfs) {
+        try {
+          const result = await extractPdfPages(pdf);
+          setFiles(prev => [...prev, ...result.pages]);
+          if (result.truncated) {
+            warnings.push(
+              `"${pdf.name}" has ${result.totalPagesInPdf} pages — only the first 10 were extracted.`
+            );
+          }
+        } catch (err) {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : `Failed to read "${pdf.name}".`;
+          warnings.push(msg);
+        }
+      }
+      setIsPdfExtracting(false);
+      if (warnings.length) setError(warnings.join(' '));
+    })();
   }, []);
 
   const setFileLanguage = useCallback((index: number, languageHint: string) => {
-    setFiles(prev =>
-      prev.map((f, i) =>
-        i === index ? { ...f, languageHint: languageHint || undefined } : f
-      )
-    );
+    setFiles(prev => {
+      const target = prev[index];
+      if (!target) return prev;
+      const hint = languageHint || undefined;
+      // If the file belongs to a PDF group, propagate the hint to all pages
+      if (target.pdfSourceId) {
+        return prev.map(f =>
+          f.pdfSourceId === target.pdfSourceId
+            ? { ...f, languageHint: hint }
+            : f
+        );
+      }
+      return prev.map((f, i) =>
+        i === index ? { ...f, languageHint: hint } : f
+      );
+    });
   }, []);
+
+  // ── Group files into logical documents for API payloads ───────────────
+
+  /**
+   * Build document groups from the flat FileInfo array.
+   * Pages from the same PDF are merged into a single group; standalone
+   * images each become their own single-page group.
+   * Only files with analysis data are included.
+   */
+  const buildGroupedDocuments = useCallback(
+    (fileList: FileInfo[]): DocumentGroup[] => {
+      const groupMap = new Map<string, DocumentPage[]>();
+      const groupNames = new Map<string, string>();
+      const groupOrder: string[] = [];
+
+      for (const f of fileList) {
+        if (!f.analysis) continue;
+        const key = f.pdfSourceId ?? f.id;
+        if (!groupMap.has(key)) {
+          groupMap.set(key, []);
+          groupNames.set(key, f.pdfSourceName ?? f.name);
+          groupOrder.push(key);
+        }
+        groupMap.get(key)!.push({
+          pageNumber: f.pdfPageNumber ?? 1,
+          name: f.name,
+          extracted_data: f.analysis,
+          translation_data: f.translation ?? null,
+        });
+      }
+
+      return groupOrder.map(key => ({
+        name: groupNames.get(key)!,
+        groupId: key,
+        pages: groupMap.get(key)!.sort((a, b) => a.pageNumber - b.pageNumber),
+      }));
+    },
+    []
+  );
+
   // ── Persist results to disk (fire-and-forget) ─────────────────────────
 
   const saveResultsToDisk = useCallback(
     (fileName: string, ocr?: OCRResult, translation?: TranslationResult) => {
+      // Only persist results in local development — never send document text
+      // to the server in production where there is nothing to write to disk.
+      if (process.env.NODE_ENV !== 'development') return;
+
       fetch('/api/save-results', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -236,11 +298,7 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        if (file.blobUrl) {
-          formData.append('blobUrl', file.blobUrl);
-        } else {
-          formData.append('file', file.file);
-        }
+        formData.append('file', file.file);
         if (file.languageHint) {
           formData.append('languageHint', file.languageHint);
         }
@@ -258,11 +316,8 @@ export const useFiles = () => {
 
         const analysis: OCRResult = await response.json();
 
-        // Clear blobUrl – the server deleted it from blob storage.
         setFiles(prev =>
-          prev.map((f, i) =>
-            i === index ? { ...f, analysis, blobUrl: undefined } : f
-          )
+          prev.map((f, i) => (i === index ? { ...f, analysis } : f))
         );
         // Save OCR result to disk
         saveResultsToDisk(file.name, analysis);
@@ -311,11 +366,7 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        if (files[index].blobUrl) {
-          formData.append('blobUrl', files[index].blobUrl!);
-        } else {
-          formData.append('file', files[index].file);
-        }
+        formData.append('file', files[index].file);
         if (files[index].languageHint) {
           formData.append('languageHint', files[index].languageHint);
         }
@@ -335,11 +386,8 @@ export const useFiles = () => {
 
         const analysis: OCRResult = await response.json();
 
-        // Clear blobUrl – the server deleted it from blob storage.
         setFiles(prev =>
-          prev.map((f, i) =>
-            i === index ? { ...f, analysis, blobUrl: undefined } : f
-          )
+          prev.map((f, i) => (i === index ? { ...f, analysis } : f))
         );
         saveResultsToDisk(files[index].name, analysis);
         completed++;
@@ -397,11 +445,7 @@ export const useFiles = () => {
 
       try {
         const formData = new FormData();
-        if (files[index].blobUrl) {
-          formData.append('blobUrl', files[index].blobUrl!);
-        } else {
-          formData.append('file', files[index].file);
-        }
+        formData.append('file', files[index].file);
         if (files[index].languageHint) {
           formData.append('languageHint', files[index].languageHint);
         }
@@ -420,9 +464,8 @@ export const useFiles = () => {
         }
 
         const analysis: OCRResult = await response.json();
-        // Clear blobUrl – the server deleted it from blob storage.
         latestFiles = latestFiles.map((f, i) =>
-          i === index ? { ...f, analysis, blobUrl: undefined } : f
+          i === index ? { ...f, analysis } : f
         );
         setFiles(latestFiles as FileInfo[]);
         saveResultsToDisk(files[index].name, analysis);
@@ -497,11 +540,7 @@ export const useFiles = () => {
             'ocrLanguage',
             (latestFiles[index].analysis as OCRResult).document_language || ''
           );
-        } else if (latestFiles[index].blobUrl) {
-          // Vision path via private blob (translate before OCR).
-          formData.append('blobUrl', latestFiles[index].blobUrl!);
         } else {
-          // Local dev fallback.
           formData.append('file', latestFiles[index].file);
         }
 
@@ -541,8 +580,8 @@ export const useFiles = () => {
     setIsTranslating(null);
 
     // Phase 3: Generate report
-    const analyzedFiles = latestFiles.filter(file => file.analysis);
-    if (analyzedFiles.length === 0) {
+    const pipelineGroups = buildGroupedDocuments(latestFiles);
+    if (pipelineGroups.length === 0) {
       setError('No analyzed files available for report generation');
       setPipeline({ stage: 'idle', percent: 0, message: '' });
       return;
@@ -556,18 +595,12 @@ export const useFiles = () => {
     });
 
     try {
-      const documents = analyzedFiles.map(file => ({
-        name: file.name,
-        extracted_data: file.analysis,
-        translation_data: file.translation || null,
-      }));
-
       const response = await fetchWithRetry(
         '/api/generate-report',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ documents }),
+          body: JSON.stringify({ documents: pipelineGroups }),
         },
         ctrl.signal
       );
@@ -592,7 +625,13 @@ export const useFiles = () => {
     } finally {
       setIsGeneratingReport(false);
     }
-  }, [files, fetchWithRetry, freshAbort, saveResultsToDisk]);
+  }, [
+    files,
+    buildGroupedDocuments,
+    fetchWithRetry,
+    freshAbort,
+    saveResultsToDisk,
+  ]);
 
   // ── Translation ───────────────────────────────────────────────────────
 
@@ -627,11 +666,7 @@ export const useFiles = () => {
             JSON.stringify(file.analysis.structured_data?.fields || [])
           );
           formData.append('ocrLanguage', file.analysis.document_language || '');
-        } else if (file.blobUrl) {
-          // Vision path via private blob (translate before OCR).
-          formData.append('blobUrl', file.blobUrl);
         } else {
-          // Local dev fallback.
           formData.append('file', file.file);
         }
 
@@ -721,11 +756,7 @@ export const useFiles = () => {
             'ocrLanguage',
             files[index].analysis!.document_language || ''
           );
-        } else if (files[index].blobUrl) {
-          // Vision path via private blob (translate before OCR).
-          formData.append('blobUrl', files[index].blobUrl!);
         } else {
-          // Local dev fallback.
           formData.append('file', files[index].file);
         }
 
@@ -773,10 +804,10 @@ export const useFiles = () => {
   // ── Discrepancy Check ─────────────────────────────────────────────────
 
   const checkDiscrepancies = useCallback(async () => {
-    const analyzedFiles = files.filter(file => file.analysis);
+    const groups = buildGroupedDocuments(files);
 
-    if (analyzedFiles.length < 2) {
-      setError('Need at least 2 analyzed files to check for discrepancies');
+    if (groups.length < 2) {
+      setError('Need at least 2 analyzed documents to check for discrepancies');
       return;
     }
 
@@ -790,17 +821,12 @@ export const useFiles = () => {
     });
 
     try {
-      const documents = analyzedFiles.map(file => ({
-        name: file.name,
-        analysis: file.analysis,
-      }));
-
       const response = await fetchWithRetry(
         '/api/analyze-discrepancies',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ documents }),
+          body: JSON.stringify({ documents: groups }),
         },
         ctrl.signal
       );
@@ -829,14 +855,14 @@ export const useFiles = () => {
       setDiscrepancyCheck(prev => ({ ...prev, isChecking: false }));
       setPipeline({ stage: 'idle', percent: 0, message: '' });
     }
-  }, [files, fetchWithRetry, freshAbort]);
+  }, [files, buildGroupedDocuments, fetchWithRetry, freshAbort]);
 
   // ── Report Generation ─────────────────────────────────────────────────
 
   const generateFullReport = useCallback(async () => {
-    const analyzedFiles = files.filter(file => file.analysis);
+    const groups = buildGroupedDocuments(files);
 
-    if (analyzedFiles.length === 0) {
+    if (groups.length === 0) {
       setError('No analyzed files available for report generation');
       return;
     }
@@ -851,18 +877,12 @@ export const useFiles = () => {
     });
 
     try {
-      const documents = analyzedFiles.map(file => ({
-        name: file.name,
-        extracted_data: file.analysis,
-        translation_data: file.translation || null,
-      }));
-
       const response = await fetchWithRetry(
         '/api/generate-report',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ documents }),
+          body: JSON.stringify({ documents: groups }),
         },
         ctrl.signal
       );
@@ -887,7 +907,7 @@ export const useFiles = () => {
     } finally {
       setIsGeneratingReport(false);
     }
-  }, [files, fetchWithRetry, freshAbort]);
+  }, [files, buildGroupedDocuments, fetchWithRetry, freshAbort]);
 
   // ── Navigation ────────────────────────────────────────────────────────
 
@@ -920,6 +940,7 @@ export const useFiles = () => {
     selectedIndex,
     isAnalyzing,
     isTranslating,
+    isPdfExtracting,
     discrepancyCheck,
     report,
     isGeneratingReport,

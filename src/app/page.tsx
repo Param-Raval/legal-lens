@@ -20,6 +20,7 @@ export default function Home() {
     selectedIndex,
     isAnalyzing,
     isTranslating,
+    isPdfExtracting,
     discrepancyCheck,
     report,
     isGeneratingReport,
@@ -125,7 +126,7 @@ export default function Home() {
         )}
 
         {/* File Upload */}
-        <FileUpload onUpload={uploadFiles} isLoading={false} />
+        <FileUpload onUpload={uploadFiles} isLoading={isPdfExtracting} />
 
         {/* Error Display */}
         <ErrorDisplay error={error} onClear={clearError} />
@@ -152,6 +153,7 @@ export default function Home() {
           isGeneratingReport={isGeneratingReport}
           isAnalyzing={isAnalyzing}
           isTranslating={isTranslating}
+          isPdfExtracting={isPdfExtracting}
           pipeline={pipeline}
           onRunFullPipeline={runFullPipeline}
           onAnalyzeAll={analyzeAllFiles}

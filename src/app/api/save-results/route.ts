@@ -10,9 +10,15 @@ const OUTPUT_DIR = isVercel
   : path.join(process.cwd(), 'output');
 
 // On a public Vercel deployment no document data is written to disk.
-// Files uploaded via Vercel Blob are already access-controlled and short-lived;
-// writing them again to /tmp would just create an unnecessary extra copy.
+// The serverless function is stateless and ephemeral; /tmp writes are
+// unnecessary and would create an extra copy of sensitive text.
 const PERSISTENCE_DISABLED = isVercel;
+
+/** Privacy headers – prevent any edge / CDN caching of document data. */
+const PRIVACY_HEADERS = {
+  'Cache-Control': 'private, no-store, no-cache, must-revalidate',
+  'X-Content-Type-Options': 'nosniff',
+} as const;
 
 /**
  * Save OCR / translation results to disk.
@@ -27,16 +33,31 @@ const PERSISTENCE_DISABLED = isVercel;
  */
 export async function POST(request: NextRequest) {
   try {
-    const { clientName, fileName, ocr, translation } = await request.json();
-
+    // Reject immediately in production – the client should not be calling this
+    // endpoint outside of local development, but guard server-side too so that
+    // no document content is ever parsed or written in a deployed environment.
     if (PERSISTENCE_DISABLED) {
-      return NextResponse.json({ saved: [], persisted: false });
+      return NextResponse.json(
+        { saved: [], persisted: false },
+        { headers: PRIVACY_HEADERS }
+      );
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let clientName: string, fileName: string, ocr: any, translation: any;
+    try {
+      ({ clientName, fileName, ocr, translation } = await request.json());
+    } catch {
+      return NextResponse.json(
+        { error: 'Request body must be valid JSON' },
+        { status: 400, headers: PRIVACY_HEADERS }
+      );
     }
 
     if (!fileName) {
       return NextResponse.json(
         { error: 'fileName is required' },
-        { status: 400 }
+        { status: 400, headers: PRIVACY_HEADERS }
       );
     }
 
@@ -146,14 +167,17 @@ export async function POST(request: NextRequest) {
       savedFiles.push(translationPath);
     }
 
-    return NextResponse.json({ saved: savedFiles, persisted: true });
+    return NextResponse.json(
+      { saved: savedFiles, persisted: true },
+      { headers: PRIVACY_HEADERS }
+    );
   } catch (error) {
     return NextResponse.json(
       {
         error:
           error instanceof Error ? error.message : 'Failed to save results',
       },
-      { status: 500 }
+      { status: 500, headers: PRIVACY_HEADERS }
     );
   }
 }

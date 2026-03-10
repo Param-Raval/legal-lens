@@ -14,8 +14,6 @@ const ACCEPTED_TYPES = [
   'image/bmp',
   'image/tiff',
   'application/pdf',
-  'text/plain',
-  'text/markdown',
 ];
 
 function isAcceptedFile(file: File): boolean {
@@ -31,8 +29,6 @@ function isAcceptedFile(file: File): boolean {
     'tiff',
     'tif',
     'pdf',
-    'txt',
-    'md',
   ].includes(ext);
 }
 

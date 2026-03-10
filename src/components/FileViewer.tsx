@@ -1,7 +1,7 @@
 // components/FileViewer.tsx
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -46,7 +46,11 @@ export const FileViewer = ({
   hasNext,
   hasPrev,
 }: FileViewerProps) => {
-  const fileUrl = file?.file ? URL.createObjectURL(file.file) : '';
+  const fileUrl = useMemo(
+    () => (file?.file ? URL.createObjectURL(file.file) : ''),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [file?.file]
+  );
 
   useEffect(() => {
     return () => {
@@ -107,7 +111,15 @@ export const FileViewer = ({
         <div className="flex items-center justify-between p-4 border-b">
           <div className="flex items-center space-x-2 flex-1 min-w-0">
             <File className="h-4 w-4 flex-shrink-0" />
-            <span className="truncate font-semibold">{file.name}</span>
+            <div className="min-w-0">
+              <span className="truncate font-semibold block">{file.name}</span>
+              {file.pdfPageNumber && file.pdfSourceName && (
+                <span className="text-xs text-muted-foreground">
+                  Page {file.pdfPageNumber} of {file.pdfTotalPages} &middot;{' '}
+                  {file.pdfSourceName}
+                </span>
+              )}
+            </div>
             {file.analysis?.document_language && (
               <Badge variant="outline" className="text-xs shrink-0">
                 {file.analysis.document_language.toUpperCase()}

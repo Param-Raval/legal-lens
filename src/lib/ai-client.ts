@@ -3,6 +3,128 @@
  * Ported from scripts/ocr.py, scripts/translation.py, scripts/report.py
  */
 import { config, validateConfig } from './config';
+import type { DocumentGroup } from '@/types';
+
+// ── Shared helpers for grouped documents ────────────────────────────────
+
+/**
+ * Merge multi-page document groups into flat document entries for AI prompts.
+ * Single-page groups pass through unchanged; multi-page groups have their
+ * texts, fields, and translations concatenated so the AI sees one entry per
+ * physical document rather than per-page.
+ */
+function flattenGroups(groups: DocumentGroup[]): Array<{
+  name: string;
+  analysis: Record<string, unknown>;
+}> {
+  return groups.map(g => {
+    if (g.pages.length === 1) {
+      const p = g.pages[0];
+      return {
+        name: g.name,
+        analysis: (p.extracted_data ?? {}) as Record<string, unknown>,
+      };
+    }
+    // Multi-page: merge
+    const texts: string[] = [];
+    const allFields: Array<{ key: string; value: string }> = [];
+    let docType = 'unknown';
+    let docLang = 'unknown';
+    for (const p of g.pages) {
+      const ext = p.extracted_data;
+      if (!ext) continue;
+      if (docType === 'unknown' && ext.document_type)
+        docType = ext.document_type;
+      if (docLang === 'unknown' && ext.document_language)
+        docLang = ext.document_language;
+      texts.push(`--- Page ${p.pageNumber} ---\n${ext.text ?? ''}`);
+      if (ext.structured_data?.fields) {
+        allFields.push(...ext.structured_data.fields);
+      }
+    }
+    return {
+      name: g.name,
+      analysis: {
+        text: texts.join('\n\n'),
+        document_type: docType,
+        document_language: docLang,
+        structured_data: { fields: allFields },
+      },
+    };
+  });
+}
+
+function flattenGroupsForReport(groups: DocumentGroup[]): Array<{
+  name: string;
+  extracted_data: Record<string, unknown>;
+  translation_data: Record<string, unknown> | null;
+}> {
+  return groups.map(g => {
+    if (g.pages.length === 1) {
+      const p = g.pages[0];
+      return {
+        name: g.name,
+        extracted_data: (p.extracted_data ?? {}) as Record<string, unknown>,
+        translation_data: (p.translation_data ?? null) as Record<
+          string,
+          unknown
+        > | null,
+      };
+    }
+    // Multi-page: merge extracted + translations
+    const texts: string[] = [];
+    const allFields: Array<{ key: string; value: string }> = [];
+    const translatedTexts: string[] = [];
+    const allTranslatedFields: Array<{ key: string; value: string }> = [];
+    let docType = 'unknown';
+    let docLang = 'unknown';
+    let hasTranslation = false;
+    const translationNotes: string[] = [];
+
+    for (const p of g.pages) {
+      const ext = p.extracted_data;
+      if (ext) {
+        if (docType === 'unknown' && ext.document_type)
+          docType = ext.document_type;
+        if (docLang === 'unknown' && ext.document_language)
+          docLang = ext.document_language;
+        texts.push(`--- Page ${p.pageNumber} ---\n${ext.text ?? ''}`);
+        if (ext.structured_data?.fields)
+          allFields.push(...ext.structured_data.fields);
+      }
+      const tr = p.translation_data;
+      if (tr) {
+        hasTranslation = true;
+        translatedTexts.push(
+          `--- Page ${p.pageNumber} ---\n${tr.translated_text ?? ''}`
+        );
+        if (tr.structured_data?.translated_fields) {
+          allTranslatedFields.push(...tr.structured_data.translated_fields);
+        }
+        if (tr.notes) translationNotes.push(tr.notes);
+      }
+    }
+
+    return {
+      name: g.name,
+      extracted_data: {
+        text: texts.join('\n\n'),
+        document_type: docType,
+        document_language: docLang,
+        structured_data: { fields: allFields },
+      },
+      translation_data: hasTranslation
+        ? {
+            translated_text: translatedTexts.join('\n\n'),
+            original_language: docLang,
+            target_language: 'en',
+            structured_data: { translated_fields: allTranslatedFields },
+            notes: translationNotes.join(' | '),
+          }
+        : null,
+    };
+  });
+}
 
 // ── Shared helpers ──────────────────────────────────────────────────────
 
@@ -125,8 +247,12 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
     }
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      lastError = new Error(`OpenAI API error ${response.status}: ${errText}`);
+      // Only include the HTTP status in the error — NEVER surface the raw
+      // response body, which could echo back parts of the request containing
+      // sensitive document content (PII).
+      lastError = new Error(
+        `OpenAI API error ${response.status}. Please try again.`
+      );
       // Retry on 5xx server errors
       if (response.status >= 500 && attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
@@ -462,9 +588,8 @@ Return ONLY valid JSON, no additional text.`;
  * Check for discrepancies across analyzed documents.
  * Simple version for quick checks.
  */
-export async function checkDiscrepancies(
-  documents: Array<{ name: string; analysis: Record<string, unknown> }>
-) {
+export async function checkDiscrepancies(groups: DocumentGroup[]) {
+  const documents = flattenGroups(groups);
   const prompt = `Here is a list of documents that will be used in an immigration application to Canada. Check for any potential discrepancies/issues with these documents. Return a JSON response with hasDiscrepancies (boolean) and summary (string):
 
 ${JSON.stringify(documents, null, 2)}`;
@@ -487,13 +612,8 @@ ${JSON.stringify(documents, null, 2)}`;
  * Generate a comprehensive immigration document analysis report.
  * Matches scripts/report.py generate_report().
  */
-export async function generateReport(
-  documents: Array<{
-    name: string;
-    extracted_data: Record<string, unknown>;
-    translation_data?: Record<string, unknown> | null;
-  }>
-) {
+export async function generateReport(groups: DocumentGroup[]) {
+  const documents = flattenGroupsForReport(groups);
   // Prepare documents for analysis (matches report.py logic)
   const docsForAnalysis = documents.map(doc => {
     const extracted = doc.extracted_data || {};

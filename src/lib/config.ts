@@ -9,7 +9,10 @@ export const config = {
     model: process.env.GPT4O_DEPLOYMENT || 'gpt-4o',
   },
   ollama: {
-    baseUrl: (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/+$/, ''),
+    baseUrl: (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(
+      /\/+$/,
+      ''
+    ),
     visionModel: process.env.OLLAMA_MODEL || 'qwen2.5vl',
     reasoningModel: process.env.OLLAMA_REASONING_MODEL || 'deepseek-r1:8b',
   },

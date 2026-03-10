@@ -1,8 +1,9 @@
 'use client';
 
+import { useMemo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { File, Brain, CheckCircle } from 'lucide-react';
+import { File, Brain, CheckCircle, FileText } from 'lucide-react';
 import { FileInfo } from '@/types';
 import { formatFileSize } from '@/lib/utils';
 
@@ -11,13 +12,30 @@ interface FileSummaryProps {
 }
 
 export const FileSummary = ({ files }: FileSummaryProps) => {
-  if (files.length === 0) return null;
+  const stats = useMemo(() => {
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    const analyzedCount = files.filter(file => file.analysis).length;
+    const imageCount = files.filter(file =>
+      file.type.startsWith('image/')
+    ).length;
+    // Count distinct documents: each pdfSourceId is one document; each non-PDF file is one document
+    const pdfIds = new Set<string>();
+    let standaloneCount = 0;
+    for (const f of files) {
+      if (f.pdfSourceId) pdfIds.add(f.pdfSourceId);
+      else standaloneCount++;
+    }
+    const documentCount = pdfIds.size + standaloneCount;
+    return {
+      totalSize,
+      analyzedCount,
+      imageCount,
+      documentCount,
+      pdfCount: pdfIds.size,
+    };
+  }, [files]);
 
-  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-  const analyzedCount = files.filter(file => file.analysis).length;
-  const imageCount = files.filter(file =>
-    file.type.startsWith('image/')
-  ).length;
+  if (files.length === 0) return null;
 
   return (
     <Card>
@@ -27,29 +45,44 @@ export const FileSummary = ({ files }: FileSummaryProps) => {
             <div className="flex justify-center">
               <File className="h-6 w-6 text-blue-600" />
             </div>
-            <p className="text-2xl font-bold">{files.length}</p>
-            <p className="text-sm text-muted-foreground">Total Files</p>
+            <p className="text-2xl font-bold">{stats.documentCount}</p>
+            <p className="text-sm text-muted-foreground">
+              Document{stats.documentCount !== 1 ? 's' : ''}
+              {stats.pdfCount > 0 && (
+                <span className="block text-[10px]">
+                  ({files.length} pages total)
+                </span>
+              )}
+            </p>
           </div>
 
           <div className="space-y-1">
             <div className="flex justify-center">
-              <Brain className="h-6 w-6 text-green-600" />
+              {stats.pdfCount > 0 ? (
+                <FileText className="h-6 w-6 text-red-500" />
+              ) : (
+                <Brain className="h-6 w-6 text-green-600" />
+              )}
             </div>
-            <p className="text-2xl font-bold">{imageCount}</p>
-            <p className="text-sm text-muted-foreground">Images</p>
+            <p className="text-2xl font-bold">{stats.imageCount}</p>
+            <p className="text-sm text-muted-foreground">
+              Pages
+              {stats.pdfCount > 0 &&
+                ` (${stats.pdfCount} PDF${stats.pdfCount !== 1 ? 's' : ''})`}
+            </p>
           </div>
 
           <div className="space-y-1">
             <div className="flex justify-center">
               <CheckCircle className="h-6 w-6 text-purple-600" />
             </div>
-            <p className="text-2xl font-bold">{analyzedCount}</p>
+            <p className="text-2xl font-bold">{stats.analyzedCount}</p>
             <p className="text-sm text-muted-foreground">Analyzed</p>
           </div>
 
           <div className="space-y-1">
             <Badge variant="outline" className="text-lg px-3 py-1">
-              {formatFileSize(totalSize)}
+              {formatFileSize(stats.totalSize)}
             </Badge>
             <p className="text-sm text-muted-foreground">Total Size</p>
           </div>

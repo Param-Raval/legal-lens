@@ -51,15 +51,37 @@ export interface FileInfo {
   size: number;
   type: string;
   file: File;
-  /**
-   * Private Vercel Blob URL created during client-side upload.
-   * Present when running on Vercel; undefined in local dev without blob env.
-   */
-  blobUrl?: string;
   /** Optional language hint set by user (ISO 639-1 code) */
   languageHint?: string;
   analysis?: OCRResult;
   translation?: TranslationResult;
+  /** Shared UUID linking all pages extracted from the same PDF */
+  pdfSourceId?: string;
+  /** Original PDF filename (e.g. "passport.pdf") */
+  pdfSourceName?: string;
+  /** 1-based page number within the source PDF */
+  pdfPageNumber?: number;
+  /** Total number of pages extracted from the source PDF */
+  pdfTotalPages?: number;
+}
+
+// ── Grouped document types for API payloads ─────────────────────────────
+
+/** A single page's analysis + translation data (no File handle — safe to serialise). */
+export interface DocumentPage {
+  pageNumber: number;
+  name: string;
+  extracted_data?: OCRResult;
+  translation_data?: TranslationResult | null;
+}
+
+/** A logical document: either a standalone image or a multi-page PDF. */
+export interface DocumentGroup {
+  /** Display name (PDF filename or image filename) */
+  name: string;
+  /** Unique group key (pdfSourceId or file id) */
+  groupId: string;
+  pages: DocumentPage[];
 }
 
 // ── Analysis Report (matches scripts/types.py AnalysisReport) ───────────

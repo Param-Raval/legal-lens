@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "dev": "next dev",
@@ -13,18 +13,20 @@
     "lint:fix": "next lint --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "format:fix": "prettier --write . && next lint --fix"
+    "format:fix": "prettier --write . && next lint --fix",
+    "test-pipeline": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/test-pipeline.ts"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.96",
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-slot": "^1.2.3",
-    "@vercel/blob": "^2.3.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "jspdf": "^4.1.0",
     "jspdf-autotable": "^5.0.7",
     "lucide-react": "^0.519.0",
     "next": "15.5.12",
+    "pdfjs-dist": "^5.5.207",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.3.1",
@@ -43,6 +45,7 @@
     "eslint-plugin-prettier": "^5.5.0",
     "prettier": "^3.5.3",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }

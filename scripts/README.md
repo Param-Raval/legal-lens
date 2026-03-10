@@ -72,7 +72,7 @@ pdf_path = save_as_pdf(report, "output/report.pdf", client_name="John Doe")
 
 ## Integration with TypeScript App
 
-The types in `types.py` mirror the TypeScript interfaces in `src/types/index.ts`. 
+The types in `types.py` mirror the TypeScript interfaces in `src/types/index.ts`.
 When integrating:
 
 1. **Call from API routes**: Use Python subprocess or a separate microservice
@@ -96,6 +96,7 @@ export async function POST(request: NextRequest) {
 ## Output Types
 
 ### OCRResult
+
 ```json
 {
   "text": "extracted text",
@@ -107,6 +108,7 @@ export async function POST(request: NextRequest) {
 ```
 
 ### AnalysisReport
+
 ```json
 {
   "executive_summary": { "overall_assessment": "CLEAR|MINOR CONCERNS|REQUIRES ATTENTION", ... },
