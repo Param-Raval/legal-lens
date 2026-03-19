@@ -2,7 +2,7 @@
  * AI client abstraction - supports both OpenAI (Azure) and Ollama backends.
  * Ported from scripts/ocr.py, scripts/translation.py, scripts/report.py
  */
-import { config, validateConfig } from './config';
+import { getConfig, validateConfig } from './config';
 import type { DocumentGroup } from '@/types';
 
 // ── Shared helpers for grouped documents ────────────────────────────────
@@ -202,25 +202,27 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
     jsonMode = true,
   } = opts;
 
+  // Fail fast with a clear message if env vars are missing
+  validateConfig();
+
+  const cfg = getConfig();
+
   const body: Record<string, unknown> = {
-    model: config.openai.model,
+    model: cfg.openai.model,
     messages,
     temperature,
     max_tokens: maxTokens,
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
-  // Fail fast with a clear message if env vars are missing
-  validateConfig();
-
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const response = await fetch(`${config.openai.baseUrl}/chat/completions`, {
+    const response = await fetch(`${cfg.openai.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.openai.apiKey}`,
+        Authorization: `Bearer ${cfg.openai.apiKey}`,
       },
       body: JSON.stringify(body),
     });
@@ -319,7 +321,8 @@ async function ollamaGenerate(opts: {
   };
   if (opts.images) body.images = opts.images;
 
-  const response = await fetch(`${config.ollama.baseUrl}/api/generate`, {
+  const cfg = getConfig();
+  const response = await fetch(`${cfg.ollama.baseUrl}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -375,7 +378,7 @@ Return your response as JSON with this EXACT structure:
 
 Return ONLY valid JSON, no additional text.`;
 
-  if (config.provider === 'openai') {
+  if (getConfig().provider === 'openai') {
     return await openaiChat({
       messages: [
         {
@@ -396,7 +399,7 @@ Return ONLY valid JSON, no additional text.`;
 
   // Ollama fallback
   return await ollamaGenerate({
-    model: config.ollama.visionModel,
+    model: getConfig().ollama.visionModel,
     prompt: OCR_PROMPT,
     images: [base64Image],
   });
@@ -475,7 +478,7 @@ Return your response as JSON with this structure:
 
 Return ONLY valid JSON, no additional text.`;
 
-  if (config.provider === 'openai') {
+  if (getConfig().provider === 'openai') {
     return await openaiChat({
       messages: [
         {
@@ -495,7 +498,7 @@ Return ONLY valid JSON, no additional text.`;
   }
 
   return await ollamaGenerate({
-    model: config.ollama.visionModel,
+    model: getConfig().ollama.visionModel,
     prompt: TRANSLATE_PROMPT,
     images: [base64Image],
   });
@@ -570,7 +573,7 @@ Return your response as JSON with this structure:
 
 Return ONLY valid JSON, no additional text.`;
 
-  if (config.provider === 'openai') {
+  if (getConfig().provider === 'openai') {
     return await openaiChat({
       messages: [{ role: 'user', content: TRANSLATE_PROMPT }],
       temperature: 0.1,
@@ -579,7 +582,7 @@ Return ONLY valid JSON, no additional text.`;
   }
 
   return await ollamaGenerate({
-    model: config.ollama.reasoningModel,
+    model: getConfig().ollama.reasoningModel,
     prompt: TRANSLATE_PROMPT,
   });
 }
@@ -594,7 +597,7 @@ export async function checkDiscrepancies(groups: DocumentGroup[]) {
 
 ${JSON.stringify(documents, null, 2)}`;
 
-  if (config.provider === 'openai') {
+  if (getConfig().provider === 'openai') {
     return await openaiChat({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
@@ -603,7 +606,7 @@ ${JSON.stringify(documents, null, 2)}`;
   }
 
   return await ollamaGenerate({
-    model: config.ollama.reasoningModel,
+    model: getConfig().ollama.reasoningModel,
     prompt,
   });
 }
@@ -730,7 +733,7 @@ IMPORTANT:
 
 Return ONLY valid JSON, no additional text.`;
 
-  if (config.provider === 'openai') {
+  if (getConfig().provider === 'openai') {
     return await openaiChat({
       messages: [
         {
@@ -746,7 +749,7 @@ Return ONLY valid JSON, no additional text.`;
   }
 
   return await ollamaGenerate({
-    model: config.ollama.reasoningModel,
+    model: getConfig().ollama.reasoningModel,
     prompt: REPORT_PROMPT,
   });
 }

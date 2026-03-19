@@ -1,0 +1,65 @@
+appId: com.brcassistant.app
+productName: BRC Assistant
+copyright: Copyright 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# Electron main/preload process files
+files:
+  - dist-electron/**/*
+  - "!node_modules"
+  - "!src"
+  - "!electron"
+  - "!scripts"
+  - "!.next"
+
+# The standalone server + assets are placed in resources/
+extraResources:
+  - from: .next/standalone
+    to: standalone
+  - from: .next/standalone/node_modules
+    to: standalone/node_modules
+  - from: .env.example
+    to: .env.example
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.business
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/@napi-rs/**"
+  - "**/node_modules/pdfjs-dist/**"

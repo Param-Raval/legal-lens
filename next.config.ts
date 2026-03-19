@@ -1,6 +1,10 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  // Produce a self-contained server.js for Electron desktop packaging.
+  // Vercel ignores this setting and uses its own adapter.
+  output: 'standalone',
+
   // Prevent webpack from trying to bundle native Node.js addons used in
   // server-side API routes (e.g. @napi-rs/canvas for PDF rendering).
   serverExternalPackages: ['@napi-rs/canvas', 'pdfjs-dist'],

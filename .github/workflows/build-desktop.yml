@@ -1,0 +1,65 @@
+name: Build Desktop Apps
+
+on:
+  workflow_dispatch:          # manual trigger from GitHub UI
+  push:
+    tags:
+      - 'v*'                  # auto-build on version tags like v1.0.0
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+          - os: windows-latest
+            platform: win
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Install platform-specific @napi-rs/canvas binaries.
+      # npm ci only installs for the current platform; the prepare script
+      # copies whatever is available.
+      - name: Install native canvas binaries (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          npm install --no-save @napi-rs/canvas-darwin-arm64 @napi-rs/canvas-darwin-x64 || true
+
+      - name: Build Next.js standalone
+        run: npx cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build
+
+      - name: Prepare standalone directory
+        run: node scripts/prepare-standalone.mjs
+
+      - name: Compile Electron TypeScript
+        run: npx tsc -p electron/tsconfig.json
+
+      - name: Build Electron app
+        run: npx electron-builder --config electron-builder.yml --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: warn

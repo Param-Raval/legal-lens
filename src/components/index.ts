@@ -5,3 +5,4 @@ export { FileUpload } from './FileUpload';
 export { FileViewer } from './FileViewer';
 export { FileSummary } from './FileSummary';
 export { ReportViewer } from './ReportViewer';
+export { SettingsDialog } from './SettingsDialog';

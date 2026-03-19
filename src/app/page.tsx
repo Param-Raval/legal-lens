@@ -12,6 +12,7 @@ import {
   ErrorDisplay,
   ApplicationAnalyzer,
   ReportViewer,
+  SettingsDialog,
 } from '@/components';
 
 export default function Home() {
@@ -85,19 +86,22 @@ export default function Home() {
               <FileText className="h-8 w-8 text-primary" />
             </div>
             <h1 className="text-4xl font-bold tracking-tight">BRC Assistant</h1>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={toggleDarkMode}
-              className="absolute right-0 top-0 h-9 w-9 p-0"
-              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-            >
-              {darkMode ? (
-                <Sun className="h-4 w-4" />
-              ) : (
-                <Moon className="h-4 w-4" />
-              )}
-            </Button>
+            <div className="absolute right-0 top-0 flex items-center gap-1">
+              <SettingsDialog />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={toggleDarkMode}
+                className="h-9 w-9 p-0"
+                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {darkMode ? (
+                  <Sun className="h-4 w-4" />
+                ) : (
+                  <Moon className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
           </div>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
             Immigration document analysis with AI-powered OCR, translation, and

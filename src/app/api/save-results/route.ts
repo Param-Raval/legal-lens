@@ -5,9 +5,8 @@ import os from 'os';
 
 // On Vercel the project directory is read-only; use /tmp for ephemeral writes.
 const isVercel = !!process.env.VERCEL;
-const OUTPUT_DIR = isVercel
-  ? path.join(os.tmpdir(), 'output')
-  : path.join(process.cwd(), 'output');
+const OUTPUT_DIR = process.env.OUTPUT_DIR
+  || (isVercel ? path.join(os.tmpdir(), 'output') : path.join(process.cwd(), 'output'));
 
 // On a public Vercel deployment no document data is written to disk.
 // The serverless function is stateless and ephemeral; /tmp writes are

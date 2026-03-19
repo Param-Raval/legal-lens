@@ -262,7 +262,11 @@ export const useFiles = () => {
     (fileName: string, ocr?: OCRResult, translation?: TranslationResult) => {
       // Only persist results in local development — never send document text
       // to the server in production where there is nothing to write to disk.
-      if (process.env.NODE_ENV !== 'development') return;
+      if (
+        process.env.NEXT_PUBLIC_ENABLE_SAVE !== 'true' &&
+        process.env.NODE_ENV !== 'development'
+      )
+        return;
 
       fetch('/api/save-results', {
         method: 'POST',

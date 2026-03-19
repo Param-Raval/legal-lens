@@ -2,6 +2,7 @@
   "name": "brc-assistant",
   "version": "0.1.0",
   "private": true,
+  "main": "dist-electron/main.js",
   "engines": {
     "node": ">=20.19.0"
   },
@@ -14,7 +15,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "format:fix": "prettier --write . && next lint --fix",
-    "test-pipeline": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/test-pipeline.ts"
+    "test-pipeline": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/test-pipeline.ts",
+    "electron:dev": "concurrently -k \"next dev\" \"wait-on http://localhost:3000 && npx tsc -p electron/tsconfig.json && electron .\"",
+    "electron:build": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node scripts/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml",
+    "electron:build:dir": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node scripts/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml --dir"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.96",
@@ -39,6 +43,10 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "15.5.12",
     "eslint-config-prettier": "^10.1.5",
@@ -46,6 +54,7 @@
     "prettier": "^3.5.3",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.0.4"
   }
 }
