@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { translateDocument, translateText } from '@/lib/ai-client';
+import { enforceBodySize, safeErrorResponse, MAX_UPLOAD_BYTES } from '@/lib/api-guard';
 
-// Allow up to 60s for AI translation processing
+// Allow up to 60s for AI translation processing (Vercel Hobby caps at 60s).
 export const maxDuration = 60;
 
 /** Privacy headers – prevent any edge / CDN caching of document data. */
@@ -12,6 +13,9 @@ const PRIVACY_HEADERS = {
 
 export async function POST(request: NextRequest) {
   try {
+    const tooLarge = enforceBodySize(request, MAX_UPLOAD_BYTES, PRIVACY_HEADERS);
+    if (tooLarge) return tooLarge;
+
     let formData: FormData;
     try {
       formData = await request.formData();
@@ -39,6 +43,13 @@ export async function POST(request: NextRequest) {
         targetLanguage,
         languageHint
       );
+      // Defensive normalisation: ensure illegibility field is always present
+      if (result && typeof result === 'object' && !('illegibility' in result)) {
+        (result as Record<string, unknown>).illegibility = {
+          uncertain_segments: [],
+          overall_confidence: 'high',
+        };
+      }
       return NextResponse.json(result, { headers: PRIVACY_HEADERS });
     }
 
@@ -59,6 +70,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json(
+        { error: `File too large. Maximum allowed is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.` },
+        { status: 413, headers: PRIVACY_HEADERS }
+      );
+    }
+
     const mimeType = file.type;
     const base64Data = Buffer.from(await file.arrayBuffer()).toString('base64');
 
@@ -68,14 +86,15 @@ export async function POST(request: NextRequest) {
       targetLanguage,
       languageHint
     );
+    // Defensive normalisation: ensure illegibility field is always present
+    if (result && typeof result === 'object' && !('illegibility' in result)) {
+      (result as Record<string, unknown>).illegibility = {
+        uncertain_segments: [],
+        overall_confidence: 'high',
+      };
+    }
     return NextResponse.json(result, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Translation failed';
-    const isRateLimit = message.includes('Rate limited');
-    return NextResponse.json(
-      { error: message, isRateLimit },
-      { status: isRateLimit ? 429 : 500, headers: PRIVACY_HEADERS }
-    );
+    return safeErrorResponse(error, PRIVACY_HEADERS);
   }
 }

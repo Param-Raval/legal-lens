@@ -4,6 +4,7 @@ import { useRef, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Upload, Folder, File } from 'lucide-react';
+import { DOCX_MIME_TYPE } from '@/lib/utils';
 
 const ACCEPTED_TYPES = [
   'image/png',
@@ -14,6 +15,7 @@ const ACCEPTED_TYPES = [
   'image/bmp',
   'image/tiff',
   'application/pdf',
+  DOCX_MIME_TYPE,
 ];
 
 function isAcceptedFile(file: File): boolean {
@@ -29,11 +31,12 @@ function isAcceptedFile(file: File): boolean {
     'tiff',
     'tif',
     'pdf',
+    'docx',
   ].includes(ext);
 }
 
 interface FileUploadProps {
-  onUpload: (files: File[]) => void;
+  onUpload: (files: Array<{ file: File; folderPath?: string }>) => void;
   isLoading?: boolean;
 }
 
@@ -42,11 +45,13 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  /** Collect accepted files from a FileList (folders expose all nested files) */
+  /** Collect accepted files from a FileList (folders expose all nested files via webkitRelativePath) */
   const collectFiles = useCallback(
     (fileList: FileList) => {
-      const accepted = Array.from(fileList).filter(isAcceptedFile);
-      if (accepted.length > 0) onUpload(accepted);
+      const entries = Array.from(fileList)
+        .filter(isAcceptedFile)
+        .map(f => ({ file: f, folderPath: f.webkitRelativePath || undefined }));
+      if (entries.length > 0) onUpload(entries);
     },
     [onUpload]
   );
@@ -66,12 +71,15 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
       e.stopPropagation();
       setIsDragOver(false);
 
-      /** Recursively read entries from a DataTransferItem (supports folders) */
-      const readEntries = async (entry: FileSystemEntry): Promise<File[]> => {
+      /** Recursively read entries from a DataTransferItem (supports folders);
+       *  carries entry.fullPath so the caller can infer which subfolder each file came from. */
+      const readEntries = async (entry: FileSystemEntry): Promise<Array<{ file: File; folderPath: string }>> => {
         if (entry.isFile) {
-          return new Promise<File[]>((resolve, reject) => {
+          return new Promise<Array<{ file: File; folderPath: string }>>((resolve, reject) => {
             (entry as FileSystemFileEntry).file(
-              f => (isAcceptedFile(f) ? resolve([f]) : resolve([])),
+              f => isAcceptedFile(f)
+                ? resolve([{ file: f, folderPath: entry.fullPath }])
+                : resolve([]),
               reject
             );
           });
@@ -103,10 +111,10 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
       const items = e.dataTransfer.items;
       if (!items || items.length === 0) return;
 
-      const allFiles: File[] = [];
+      const allEntries: Array<{ file: File; folderPath?: string }> = [];
 
       // Try the modern webkitGetAsEntry path (supports folders)
-      const entryPromises: Promise<File[]>[] = [];
+      const entryPromises: Promise<Array<{ file: File; folderPath: string }>>[] = [];
       for (let i = 0; i < items.length; i++) {
         const entry = items[i].webkitGetAsEntry?.();
         if (entry) {
@@ -116,16 +124,16 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
 
       if (entryPromises.length > 0) {
         const results = await Promise.all(entryPromises);
-        allFiles.push(...results.flat());
+        allEntries.push(...results.flat());
       } else {
-        // Fallback: plain file drop
+        // Fallback: plain file drop (no folder path info)
         const dt = e.dataTransfer.files;
         for (let i = 0; i < dt.length; i++) {
-          if (isAcceptedFile(dt[i])) allFiles.push(dt[i]);
+          if (isAcceptedFile(dt[i])) allEntries.push({ file: dt[i] });
         }
       }
 
-      if (allFiles.length > 0) onUpload(allFiles);
+      if (allEntries.length > 0) onUpload(allEntries);
     },
     [onUpload]
   );
@@ -164,6 +172,9 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
             <p className="text-sm text-muted-foreground">
               Drag & drop files or folders here, or use the buttons below
             </p>
+            <p className="text-xs text-muted-foreground">
+              Supported formats: Images (PNG, JPG, GIF, WebP, BMP, TIFF), PDF, Word (.docx)
+            </p>
           </div>
 
           <div className="flex items-center justify-center gap-3">
@@ -192,7 +203,7 @@ export const FileUpload = ({ onUpload, isLoading }: FileUploadProps) => {
             multiple
             onChange={handleFileSelect}
             className="hidden"
-            accept="image/*,.pdf,.txt,.md"
+            accept={`image/*,.pdf,.docx,${DOCX_MIME_TYPE}`}
           />
 
           {/* Folder picker */}

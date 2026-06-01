@@ -1,4 +1,6 @@
 {
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.terminal.useEnvFile": true,
   "editor.formatOnSave": true,
   "editor.defaultFormatter": "esbenp.prettier-vscode",
   "editor.codeActionsOnSave": {

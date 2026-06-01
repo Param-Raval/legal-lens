@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FileText, Moon, Sun } from 'lucide-react';
+import { FileText, Moon, Sun, StickyNote } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useFiles } from '@/hooks/useFiles';
 import {
@@ -34,6 +34,7 @@ export default function Home() {
     runFullPipeline,
     translateFile,
     translateAllFiles,
+    translateAllWithoutAnalysis,
     checkDiscrepancies,
     generateFullReport,
     stopProcessing,
@@ -44,6 +45,26 @@ export default function Home() {
     prevFile,
     closeViewer,
     clearError,
+    // Family mode
+    familyModeEnabled,
+    familyGraph,
+    isInferringRelationships,
+    toggleFamilyMode,
+    addFamilyMember,
+    removeFamilyMember,
+    updateFamilyMember,
+    assignDocumentToMember,
+    addRelationship,
+    removeRelationship,
+    updateRelationship,
+    inferRelationships,
+    inferStatus,
+    setInferStatus,
+    // Analysis context
+    analysisContext,
+    setAnalysisContext,
+    updateFileNotes,
+    removeFile,
   } = useFiles();
 
   const [showReport, setShowReport] = useState(false);
@@ -147,7 +168,29 @@ export default function Home() {
           onAnalyze={analyzeFile}
           onTranslate={translateFile}
           onSetLanguage={setFileLanguage}
+          onRemove={removeFile}
+          familyModeEnabled={familyModeEnabled}
+          familyMembers={familyGraph.members}
+          onAssignMember={assignDocumentToMember}
+          onUpdateFileNotes={updateFileNotes}
         />
+
+        {/* Analysis Context */}
+        {files.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+              <StickyNote className="h-4 w-4" />
+              <span>Analysis context <span className="font-normal">(optional)</span></span>
+            </div>
+            <textarea
+              value={analysisContext}
+              onChange={e => setAnalysisContext(e.target.value)}
+              rows={3}
+              placeholder="Describe what you want checked — e.g. Verify that names and dates of birth are consistent across all documents. Flag any discrepancies in the father's name."
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y"
+            />
+          </div>
+        )}
 
         {/* Analysis Pipeline */}
         <ApplicationAnalyzer
@@ -159,13 +202,30 @@ export default function Home() {
           isTranslating={isTranslating}
           isPdfExtracting={isPdfExtracting}
           pipeline={pipeline}
+          clientName={clientName}
           onRunFullPipeline={runFullPipeline}
           onAnalyzeAll={analyzeAllFiles}
           onTranslateAll={translateAllFiles}
+          onTranslateAllWithoutAnalysis={translateAllWithoutAnalysis}
           onCheckDiscrepancies={checkDiscrepancies}
           onGenerateReport={generateFullReport}
           onStopProcessing={stopProcessing}
           onViewReport={() => setShowReport(true)}
+          familyMode={{
+            familyModeEnabled,
+            familyGraph,
+            isInferringRelationships,
+            inferStatus,
+            onToggleFamilyMode: toggleFamilyMode,
+            onAddMember: addFamilyMember,
+            onRemoveMember: removeFamilyMember,
+            onUpdateMember: updateFamilyMember,
+            onAddRelationship: addRelationship,
+            onRemoveRelationship: removeRelationship,
+            onUpdateRelationship: updateRelationship,
+            onInferRelationships: inferRelationships,
+            onClearInferStatus: () => setInferStatus(null),
+          }}
         />
       </div>
 
@@ -190,6 +250,15 @@ export default function Home() {
           report={report}
           clientName={clientName}
           onClose={() => setShowReport(false)}
+          onViewSource={documentName => {
+            // Resolve a finding's document name to a file and open the viewer.
+            const idx = files.findIndex(
+              f =>
+                (f.pdfSourceName ?? f.name) === documentName ||
+                f.name === documentName
+            );
+            if (idx >= 0) selectFile(idx);
+          }}
         />
       )}
     </div>

@@ -23,28 +23,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Installs the pnpm version pinned in package.json's "packageManager" field
+      # (pnpm@11.5.0 — 10.x has a resolver bug with @napi-rs/canvas optional deps).
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          cache: pnpm
 
+      # supportedArchitectures (pnpm-workspace.yaml) makes this single install
+      # fetch the canvas binaries for both macOS arches (and win32), so no extra
+      # per-arch install step is needed.
       - name: Install dependencies
-        run: npm ci
-
-      # Install platform-specific @napi-rs/canvas binaries.
-      # npm ci only installs for the current platform; the prepare script
-      # copies whatever is available.
-      - name: Install native canvas binaries (macOS)
-        if: matrix.platform == 'mac'
-        run: |
-          npm install --no-save @napi-rs/canvas-darwin-arm64 @napi-rs/canvas-darwin-x64 || true
+        run: pnpm install --frozen-lockfile
 
       - name: Build Next.js standalone
         run: npx cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build
 
       - name: Prepare standalone directory
-        run: node scripts/prepare-standalone.mjs
+        run: node build/prepare-standalone.mjs
 
       - name: Compile Electron TypeScript
         run: npx tsc -p electron/tsconfig.json

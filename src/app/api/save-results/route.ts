@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
 
 // On Vercel the project directory is read-only; use /tmp for ephemeral writes.
 const isVercel = !!process.env.VERCEL;
@@ -41,6 +42,9 @@ export async function POST(request: NextRequest) {
         { headers: PRIVACY_HEADERS }
       );
     }
+
+    const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
+    if (tooLarge) return tooLarge;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let clientName: string, fileName: string, ocr: any, translation: any;
@@ -171,12 +175,6 @@ export async function POST(request: NextRequest) {
       { headers: PRIVACY_HEADERS }
     );
   } catch (error) {
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : 'Failed to save results',
-      },
-      { status: 500, headers: PRIVACY_HEADERS }
-    );
+    return safeErrorResponse(error, PRIVACY_HEADERS);
   }
 }

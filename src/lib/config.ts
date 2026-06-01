@@ -10,8 +10,12 @@ export interface AppConfig {
 /** Read config fresh from process.env on every call so that runtime
  *  updates (e.g. via the /api/settings endpoint) take effect immediately. */
 export function getConfig(): AppConfig {
+  // Normalize so a stray value ("OpenAI", trailing whitespace, a typo) cannot
+  // silently route away from OpenAI to the localhost Ollama branch.
+  const rawProvider = (process.env.AI_PROVIDER || 'openai').trim().toLowerCase();
+  const provider: AIProvider = rawProvider === 'ollama' ? 'ollama' : 'openai';
   return {
-    provider: (process.env.AI_PROVIDER || 'openai') as AIProvider,
+    provider,
     openai: {
       baseUrl: (process.env.GPT4O_ENDPOINT || '').replace(/\/+$/, ''),
       apiKey: process.env.GPT4O_API_KEY || '',

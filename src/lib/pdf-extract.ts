@@ -61,38 +61,44 @@ export async function extractPdfPages(
       jpeg: string;
       width: number;
       height: number;
+      text?: string;
     }>;
   };
 
-  const pdfSourceId = crypto.randomUUID();
+  // Stable source id lets us detect duplicate PDF uploads later.
+  const pdfSourceId = `pdf::${file.name}::${file.size}::${file.lastModified}`;
   const pdfSourceName = file.name;
 
-  const pages: FileInfo[] = result.pages.map(({ pageNumber, jpeg, width, height }) => {
-    // Decode base64 JPEG back to a File object
-    const byteString = atob(jpeg);
-    const byteArray = new Uint8Array(byteString.length);
-    for (let j = 0; j < byteString.length; j++) {
-      byteArray[j] = byteString.charCodeAt(j);
-    }
-    const blob = new Blob([byteArray], { type: 'image/jpeg' });
-    const jpegFile = new File(
-      [blob],
-      `${pdfSourceName}_page_${pageNumber}.jpg`,
-      { type: 'image/jpeg' }
-    );
+  const pages: FileInfo[] = result.pages.map(
+    ({ pageNumber, jpeg, width, height, text }) => {
+      // Decode base64 JPEG back to a File object
+      const byteString = atob(jpeg);
+      const byteArray = new Uint8Array(byteString.length);
+      for (let j = 0; j < byteString.length; j++) {
+        byteArray[j] = byteString.charCodeAt(j);
+      }
+      const blob = new Blob([byteArray], { type: 'image/jpeg' });
+      const jpegFile = new File(
+        [blob],
+        `${pdfSourceName}_page_${pageNumber}.jpg`,
+        { type: 'image/jpeg' }
+      );
 
-    return {
-      id: `${pdfSourceId}-page-${pageNumber}`,
-      name: `${pdfSourceName} — Page ${pageNumber}`,
-      size: jpegFile.size,
-      type: 'image/jpeg',
-      file: jpegFile,
-      pdfSourceId,
-      pdfSourceName,
-      pdfPageNumber: pageNumber,
-      pdfTotalPages: result.pagesToExtract,
-    } as FileInfo;
-  });
+      return {
+        id: `${pdfSourceId}-page-${pageNumber}`,
+        name: `${pdfSourceName} — Page ${pageNumber}`,
+        size: jpegFile.size,
+        type: 'image/jpeg',
+        file: jpegFile,
+        pdfSourceId,
+        pdfSourceName,
+        pdfPageNumber: pageNumber,
+        pdfTotalPages: result.pagesToExtract,
+        // Born-digital page: structure the exact text instead of vision-OCR.
+        ...(text ? { pdfTextLayer: text } : {}),
+      } as FileInfo;
+    }
+  );
 
   return {
     pages,
@@ -100,4 +106,3 @@ export async function extractPdfPages(
     totalPagesInPdf: result.totalPagesInPdf,
   };
 }
-

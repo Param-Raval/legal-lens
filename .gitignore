@@ -52,3 +52,6 @@ next-env.d.ts
 # electron
 /dist-electron
 /release
+
+/scripts
+/sample_docs

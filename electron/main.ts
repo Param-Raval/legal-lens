@@ -86,7 +86,7 @@ function startServer(
   extraEnv: Record<string, string>,
 ): Electron.UtilityProcess {
   const standaloneDir = path.join(process.resourcesPath, 'standalone');
-  const serverScript = path.join(standaloneDir, 'server.js');
+  const serverScript = path.join(standaloneDir, 'start.js');
 
   const outputDir = path.join(
     app.getPath('documents'),
@@ -94,6 +94,10 @@ function startServer(
     'output',
   );
   fs.mkdirSync(outputDir, { recursive: true });
+
+  const logPath = path.join(app.getPath('userData'), 'server.log');
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`\n--- server start ${new Date().toISOString()} ---\n`);
 
   const child = utilityProcess.fork(serverScript, [], {
     env: {
@@ -111,15 +115,22 @@ function startServer(
   });
 
   child.stdout?.on('data', (data: Buffer) => {
-    console.log(`[server] ${data.toString().trim()}`);
+    const line = data.toString().trim();
+    console.log(`[server] ${line}`);
+    logStream.write(`[out] ${line}\n`);
   });
 
   child.stderr?.on('data', (data: Buffer) => {
-    console.error(`[server] ${data.toString().trim()}`);
+    const line = data.toString().trim();
+    console.error(`[server] ${line}`);
+    logStream.write(`[err] ${line}\n`);
   });
 
   child.on('exit', (code) => {
-    console.log(`[server] process exited with code ${code}`);
+    const line = `process exited with code ${code}`;
+    console.log(`[server] ${line}`);
+    logStream.write(`[exit] ${line}\n`);
+    logStream.end();
     serverProcess = null;
   });
 
@@ -225,7 +236,11 @@ app.whenReady().then(async () => {
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'The server failed to start.';
-      dialog.showErrorBox('Server error', msg);
+      const logPath = path.join(app.getPath('userData'), 'server.log');
+      dialog.showErrorBox(
+        'Server error',
+        `${msg}\n\nSee log for details:\n${logPath}`,
+      );
       app.quit();
       return;
     }

@@ -15,9 +15,31 @@ import {
   X,
   Languages,
   Loader2,
+  Download,
+  AlertTriangle,
 } from 'lucide-react';
 import { FileInfo } from '@/types';
 import { canAnalyzeFile } from '@/lib/utils';
+import {
+  exportOcrAsText,
+  exportOcrAsDocx,
+  exportTranslationAsText,
+  exportTranslationAsDocx,
+  exportTranslationAsJson,
+} from '@/lib/translation-export';
+
+function renderWithMarkers(text: string) {
+  const parts = text.split(/(\[UNABLE TO READ\]|\[UNSURE - ILLEGIBLE SOURCE\])/gi);
+  return parts.map((part, i) =>
+    /unable to read|unsure - illegible source/i.test(part) ? (
+      <mark key={i} className="bg-amber-200 text-amber-900 rounded px-0.5 not-italic">
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  );
+}
 
 interface FileViewerProps {
   show: boolean;
@@ -96,7 +118,8 @@ export const FileViewer = ({
 
   const needsTranslation =
     file.analysis &&
-    file.analysis.document_language !== 'en' &&
+    (file.analysis.document_language !== 'en' ||
+      (file.languageHint && file.languageHint !== 'en')) &&
     !file.translation;
 
   return (
@@ -250,6 +273,18 @@ export const FileViewer = ({
                       <p className="text-xs text-muted-foreground">
                         Language: {file.analysis.document_language}
                       </p>
+                      {file.analysis.illegibility?.detected && (
+                        <div className="flex items-start space-x-1 text-xs text-amber-700 bg-amber-50 rounded p-1">
+                          <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+                          <span>
+                            Illegibility detected (confidence:{' '}
+                            {file.analysis.illegibility.confidence})
+                            {file.analysis.illegibility.reason
+                              ? ` — ${file.analysis.illegibility.reason}`
+                              : ''}
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Structured fields */}
@@ -278,28 +313,98 @@ export const FileViewer = ({
                       </div>
                     )}
 
-                    {/* Extracted text */}
-                    {file.analysis.text && (
+                    {(file.analysis.text ||
+                      (file.analysis.structured_data?.fields?.length ?? 0) > 0) && (
                       <div className="space-y-1">
-                        <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                          OCR Text
-                        </h4>
-                        <pre className="text-xs whitespace-pre-wrap bg-muted/10 p-2 rounded max-h-32 overflow-auto">
-                          {file.analysis.text}
-                        </pre>
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                            OCR Results
+                          </h4>
+                          <div className="flex items-center space-x-1">
+                            <Button
+                              onClick={() => exportOcrAsText(file.analysis!, file.name)}
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-xs"
+                              title="Download OCR as TXT"
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              onClick={() => {
+                                exportOcrAsDocx(file.analysis!, file.name);
+                              }}
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-xs"
+                              title="Download OCR as DOCX"
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="text-xs whitespace-pre-wrap bg-muted/10 p-2 rounded max-h-32 overflow-auto font-mono">
+                          {renderWithMarkers(file.analysis.text ?? '')}
+                        </div>
                       </div>
                     )}
 
                     {/* Translation */}
                     {file.translation && (
                       <div className="space-y-1 border-t pt-3">
-                        <h4 className="text-xs font-medium text-blue-600 uppercase tracking-wide flex items-center space-x-1">
-                          <Languages className="h-3 w-3" />
-                          <span>Translation</span>
-                        </h4>
-                        <pre className="text-xs whitespace-pre-wrap bg-blue-50 p-2 rounded max-h-32 overflow-auto">
-                          {file.translation.translated_text}
-                        </pre>
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-medium text-blue-600 uppercase tracking-wide flex items-center space-x-1">
+                            <Languages className="h-3 w-3" />
+                            <span>Translation</span>
+                          </h4>
+                          <div className="flex items-center space-x-1">
+                            <Button
+                              onClick={() =>
+                                exportTranslationAsText(
+                                  file.translation!,
+                                  file.name
+                                )
+                              }
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-xs"
+                              title="Download as TXT"
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              onClick={() =>
+                                exportTranslationAsJson(
+                                  file.translation!,
+                                  file.name
+                                )
+                              }
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-xs"
+                              title="Download as JSON"
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              onClick={() => {
+                                exportTranslationAsDocx(
+                                  file.translation!,
+                                  file.name
+                                );
+                              }}
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-xs"
+                              title="Download as DOCX"
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="text-xs whitespace-pre-wrap bg-blue-50 p-2 rounded max-h-32 overflow-auto font-mono">
+                          {renderWithMarkers(file.translation.translated_text ?? '')}
+                        </div>
                         {file.translation.notes && (
                           <p className="text-xs italic text-muted-foreground">
                             Notes: {file.translation.notes}

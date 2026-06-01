@@ -1,8 +1,11 @@
 {
   "name": "brc-assistant",
   "version": "0.1.0",
+  "description": "BRC Assistant — legal document analysis tool for border clinic caseworkers",
+  "author": "Border Relief Clinic",
   "private": true,
   "main": "dist-electron/main.js",
+  "packageManager": "pnpm@11.5.0",
   "engines": {
     "node": ">=20.19.0"
   },
@@ -17,8 +20,9 @@
     "format:fix": "prettier --write . && next lint --fix",
     "test-pipeline": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/test-pipeline.ts",
     "electron:dev": "concurrently -k \"next dev\" \"wait-on http://localhost:3000 && npx tsc -p electron/tsconfig.json && electron .\"",
-    "electron:build": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node scripts/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml",
-    "electron:build:dir": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node scripts/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml --dir"
+    "electron:build": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node build/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml",
+    "electron:build:dir": "cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node build/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml --dir",
+    "electron:pack": "node build/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.96",
@@ -26,8 +30,10 @@
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "docx": "^9.6.1",
     "jspdf": "^4.1.0",
     "jspdf-autotable": "^5.0.7",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.519.0",
     "next": "15.5.12",
     "pdfjs-dist": "^5.5.207",

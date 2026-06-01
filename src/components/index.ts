@@ -1,4 +1,5 @@
 export { ErrorDisplay } from './ErrorDisplay';
+export { FamilyMemberPanel } from './FamilyMemberPanel';
 export { ApplicationAnalyzer } from './ApplicationAnalyzer';
 export { FileList } from './FileList';
 export { FileUpload } from './FileUpload';

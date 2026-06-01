@@ -11,6 +11,7 @@ const ALLOWED_KEYS = [
   'OLLAMA_BASE_URL',
   'OLLAMA_MODEL',
   'OLLAMA_REASONING_MODEL',
+  'NEXT_PUBLIC_REPORT_MODE',
 ] as const;
 
 /** Resolve the .env file path — CONFIG_DIR is set by Electron, otherwise
@@ -68,12 +69,13 @@ export async function GET() {
 
   const env = parseEnvFile(envFilePath());
 
-  // Build response — mask secret keys, expose the rest.
+  // Build response — never reveal any characters of a secret key (a fixed
+  // placeholder + the `configured` map below is all the UI needs).
   const settings: Record<string, string> = {};
   for (const key of ALLOWED_KEYS) {
     const val = env[key] ?? process.env[key] ?? '';
-    if (key.endsWith('_KEY') && val.length > 8) {
-      settings[key] = val.slice(0, 4) + '••••' + val.slice(-4);
+    if (key.endsWith('_KEY')) {
+      settings[key] = val ? '••••••••' : '';
     } else {
       settings[key] = val;
     }
@@ -98,19 +100,44 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const body = (await req.json()) as Record<string, string>;
+  let body: Record<string, string>;
+  try {
+    body = (await req.json()) as Record<string, string>;
+  } catch {
+    return NextResponse.json({ error: 'Request body must be valid JSON' }, { status: 400 });
+  }
 
   // Read existing file first so we don't lose non-allowed keys/comments.
   const existing = parseEnvFile(envFilePath());
 
-  // Merge incoming values (only allowed keys).
+  // Merge incoming values (only allowed keys), validating before persisting so
+  // a malformed URL can't repoint server-side requests (SSRF) or break config.
+  const URL_KEYS = new Set(['GPT4O_ENDPOINT', 'OLLAMA_BASE_URL']);
+  const errors: string[] = [];
   for (const key of ALLOWED_KEYS) {
-    if (key in body) {
-      const val = String(body[key]).trim();
-      // If the UI sent back a masked value, don't overwrite the real key.
-      if (val.includes('••••')) continue;
-      existing[key] = val;
+    if (!(key in body)) continue;
+    const val = String(body[key]).trim();
+    // If the UI sent back a masked value, don't overwrite the real key.
+    if (val.includes('••••')) continue;
+
+    if (key === 'AI_PROVIDER' && val && !['openai', 'ollama'].includes(val.toLowerCase())) {
+      errors.push('AI_PROVIDER must be "openai" or "ollama".');
+      continue;
     }
+    if (URL_KEYS.has(key) && val) {
+      try {
+        const u = new URL(val);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('bad protocol');
+      } catch {
+        errors.push(`${key} must be a valid http(s) URL.`);
+        continue;
+      }
+    }
+    existing[key] = key === 'AI_PROVIDER' ? val.toLowerCase() : val;
+  }
+
+  if (errors.length) {
+    return NextResponse.json({ error: errors.join(' ') }, { status: 400 });
   }
 
   // Write to disk.

@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateReport } from '@/lib/ai-client';
+import { inferFamilyRelationships } from '@/lib/ai-client';
 import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
-import type { ClassifiedFieldFinding, DocumentSummary, ParsedIntent } from '@/types';
 
-// Allow up to 60s for report generation.
-// Vercel Hobby plan caps at 60s; upgrade to Pro for longer timeouts.
+// Allow up to 60s for relationship inference
 export const maxDuration = 60;
 
 /** Privacy headers – prevent any edge / CDN caching of document data. */
@@ -18,14 +16,13 @@ export async function POST(request: NextRequest) {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
 
-    let summaries: DocumentSummary[];
-    let excludedDocuments: Array<{ name: string; reason: string }> | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let familyGraph: any | undefined;
-    let parsedIntent: ParsedIntent | undefined;
-    let fieldFindings: ClassifiedFieldFinding[] | undefined;
+    let documents: any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let familyMembers: any[];
+    let perDocNotes: Array<{ fileName: string; notes: string }> | undefined;
     try {
-      ({ summaries, excludedDocuments, familyGraph, parsedIntent, fieldFindings } = await request.json());
+      ({ documents, familyMembers, perDocNotes } = await request.json());
     } catch {
       return NextResponse.json(
         { error: 'Request body must be valid JSON' },
@@ -33,15 +30,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!summaries?.length) {
+    if (!documents?.length) {
       return NextResponse.json(
-        { error: 'No document summaries provided' },
+        { error: 'No documents provided' },
         { status: 400, headers: PRIVACY_HEADERS }
       );
     }
 
-    const report = await generateReport(summaries, excludedDocuments, familyGraph, parsedIntent, fieldFindings);
-    return NextResponse.json(report, { headers: PRIVACY_HEADERS });
+    if (!familyMembers?.length || familyMembers.length < 2) {
+      return NextResponse.json(
+        { error: 'At least 2 family members are required' },
+        { status: 400, headers: PRIVACY_HEADERS }
+      );
+    }
+
+    const result = await inferFamilyRelationships(documents, familyMembers, perDocNotes);
+    const relationships = (result as Record<string, unknown>).relationships ?? [];
+    return NextResponse.json({ relationships }, { headers: PRIVACY_HEADERS });
   } catch (error) {
     return safeErrorResponse(error, PRIVACY_HEADERS);
   }

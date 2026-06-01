@@ -1,0 +1,32 @@
+# pnpm 10.12+/11 reads pnpm-specific settings from here (no longer from .npmrc).
+#
+# Use a flat, hoisted node_modules (like npm) so `next build` (output:
+# 'standalone') produces a self-contained tree of REAL files that can be
+# packaged into the Electron app. pnpm's default isolated layout uses symlinks
+# into the local .pnpm store, which break once the app is copied elsewhere.
+nodeLinker: hoisted
+
+# pnpm 10+ blocks dependency install/build scripts unless approved here.
+# electron downloads its prebuilt binary in postinstall; the native modules
+# build/link their addons. core-js's postinstall is only a funding notice.
+allowBuilds:
+  core-js: false
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+
+# Install native optional binaries (e.g. @napi-rs/canvas) for every OS/arch we
+# package, not just the CI runner's own. The macOS dmg targets BOTH x64 and
+# arm64, so a single-arch runner must still fetch the other arch's binary.
+# build/prepare-standalone.mjs only bundles the binaries matching the build OS.
+supportedArchitectures:
+  os:
+    - current
+    - win32
+    - darwin
+  cpu:
+    - current
+    - x64
+    - arm64

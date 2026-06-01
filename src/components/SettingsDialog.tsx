@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Settings, Check, Loader2, AlertCircle } from 'lucide-react';
+import { Settings, Check, Loader2, AlertCircle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { clearResultCache } from '@/lib/result-cache';
 import {
   Dialog,
   DialogContent,
@@ -22,6 +23,7 @@ interface FormState {
   GPT4O_DEPLOYMENT: string;
   OLLAMA_BASE_URL: string;
   OLLAMA_MODEL: string;
+  NEXT_PUBLIC_REPORT_MODE: 'light' | 'deep';
 }
 
 const DEFAULTS: FormState = {
@@ -31,6 +33,7 @@ const DEFAULTS: FormState = {
   GPT4O_DEPLOYMENT: 'gpt-4o',
   OLLAMA_BASE_URL: 'http://localhost:11434',
   OLLAMA_MODEL: 'qwen2.5vl',
+  NEXT_PUBLIC_REPORT_MODE: 'light',
 };
 
 export function SettingsDialog() {
@@ -40,6 +43,8 @@ export function SettingsDialog() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [cleared, setCleared] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,6 +60,7 @@ export function SettingsDialog() {
         GPT4O_DEPLOYMENT: settings.GPT4O_DEPLOYMENT || 'gpt-4o',
         OLLAMA_BASE_URL: settings.OLLAMA_BASE_URL || 'http://localhost:11434',
         OLLAMA_MODEL: settings.OLLAMA_MODEL || 'qwen2.5vl',
+        NEXT_PUBLIC_REPORT_MODE: ((settings.NEXT_PUBLIC_REPORT_MODE || 'light') as 'light' | 'deep'),
       });
     } catch {
       setError('Could not load settings.');
@@ -84,6 +90,21 @@ export function SettingsDialog() {
       setError('Failed to save settings.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const clearCache = async () => {
+    setClearing(true);
+    setCleared(false);
+    setError(null);
+    try {
+      await clearResultCache();
+      setCleared(true);
+      setTimeout(() => setCleared(false), 2000);
+    } catch {
+      setError('Failed to clear cached results.');
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -204,6 +225,50 @@ export function SettingsDialog() {
                 </div>
               </fieldset>
             )}
+
+            {/* Report Mode */}
+            <fieldset className="space-y-2 rounded-md border border-border p-4">
+              <legend className="text-sm font-semibold px-1">Report Generation</legend>
+              <div>
+                <label className={labelCls}>Report Mode</label>
+                <select
+                  value={form.NEXT_PUBLIC_REPORT_MODE}
+                  onChange={e => update('NEXT_PUBLIC_REPORT_MODE', e.target.value)}
+                  className={inputCls}
+                >
+                  <option value="light">Light — extract fields locally (fast, no extra AI calls)</option>
+                  <option value="deep">Deep — AI reads each document individually (slower, more detail)</option>
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Takes effect after restarting the app.
+                </p>
+              </div>
+            </fieldset>
+
+            {/* Cached results */}
+            <fieldset className="space-y-2 rounded-md border border-border p-4">
+              <legend className="text-sm font-semibold px-1">Cached Results</legend>
+              <p className="text-xs text-muted-foreground">
+                OCR and translation results are cached in this browser only (never
+                uploaded) so re-analyzing the same document doesn&apos;t make a new
+                AI call. Clear the cache to force a fresh analysis.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={clearCache}
+                disabled={clearing}
+              >
+                {clearing ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : cleared ? (
+                  <Check className="h-4 w-4 mr-2" />
+                ) : (
+                  <Trash2 className="h-4 w-4 mr-2" />
+                )}
+                {cleared ? 'Cleared' : 'Clear cached results'}
+              </Button>
+            </fieldset>
 
             {/* Error / success */}
             {error && (

@@ -27,26 +27,44 @@ const COLORS = {
   lightRed: [255, 182, 193] as [number, number, number],
 };
 
+// Turkish (and a few related) letters that are NOT in jsPDF's default Helvetica
+// (WinAnsi/CP1252) encoding. Left unmapped, jsPDF substitutes garbage glyphs
+// (\u0130 rendered as "0", \u015e as "^") AND mis-measures the line width, which is what
+// produced the stretched "A Y L 0 N" letter-spacing in the report. We
+// transliterate them to ASCII so names render readably (e.g. AYL\u0130N, AY\u015eE).
+const NON_WINANSI_MAP: Record<string, string> = {
+  İ: 'I',
+  ı: 'i',
+  Ş: 'S',
+  ş: 's',
+  Ğ: 'G',
+  ğ: 'g',
+};
+
 function sanitize(text: unknown): string {
   if (typeof text !== 'string') text = String(text ?? '');
-  return (text as string)
-    .replace(/[\u2022]/g, '-')
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201c\u201d]/g, '"')
-    .replace(/[\u2013]/g, '-')
-    .replace(/[\u2014]/g, '--');
-}
-
-function getAssessmentColor(assessment: string): [number, number, number] {
-  if (assessment === 'CLEAR') return COLORS.green;
-  if (assessment === 'MINOR CONCERNS') return COLORS.yellow;
-  return COLORS.red;
-}
-
-function getSeverityColor(severity: string): [number, number, number] {
-  if (severity === 'High') return COLORS.red;
-  if (severity === 'Medium') return COLORS.yellow;
-  return COLORS.green;
+  return (
+    (text as string)
+      .replace(/[•]/g, '-')
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/[–]/g, '-')
+      .replace(/[—]/g, '--')
+      .replace(/[İıŞşĞğ]/g, c => NON_WINANSI_MAP[c] ?? c)
+      // Any char >= U+0100 is outside Latin-1 (which jsPDF's WinAnsi font covers)
+      // and renders as garbage: fold accents to ASCII (Ā -> A) where possible,
+      // else drop it. Chars <= U+00FF (ASCII, newlines/tabs, accented Latin-1) are
+      // left untouched.
+      .replace(/[Ā-￿]/g, c => {
+        const folded = c.normalize('NFKD').replace(/[̀-ͯ]/g, '');
+        // Fold accents to ASCII where possible; otherwise emit a sentinel (NEVER '')
+        // so a non-Latin name (Cyrillic/Arabic/CJK) can't silently vanish from the PDF.
+        return /^[\x20-\x7e]*$/.test(folded) ? folded : '¤';
+      })
+      // Collapse runs of untransliterable characters into one visible marker. The exact
+      // characters remain intact in the on-screen report and the JSON export.
+      .replace(/¤+/g, '[?]')
+  );
 }
 
 export function exportReportAsPdf(
@@ -79,12 +97,15 @@ export function exportReportAsPdf(
   };
 
   const subTitle = (title: string) => {
-    checkPageBreak(12);
     doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(...COLORS.dark);
-    doc.text(sanitize(title), margin, y);
-    y += 6;
+    // Wrap long sub-titles (e.g. member concordance summaries) instead of letting
+    // them run off the right margin.
+    const lines = doc.splitTextToSize(sanitize(title), contentWidth);
+    checkPageBreak(lines.length * 6 + 2);
+    doc.text(lines, margin, y);
+    y += lines.length * 6;
   };
 
   const bodyText = (text: string, indent = 0) => {
@@ -135,74 +156,68 @@ export function exportReportAsPdf(
     y,
     { align: 'center' }
   );
-  y += 12;
+  y += 6;
 
-  // ── 1. Executive Summary ──────────────────────────────────────────────
-
-  const exec = report.executive_summary;
-  sectionTitle('1. EXECUTIVE SUMMARY');
-
-  // Assessment badge
-  const assessment = exec.overall_assessment || 'N/A';
-  doc.setFontSize(12);
-  doc.setFont('helvetica', 'bold');
-  doc.text('Overall Assessment: ', margin, y);
-  const aWidth = doc.getTextWidth('Overall Assessment: ');
-  const badgeColor = getAssessmentColor(assessment);
-  doc.setFillColor(...badgeColor);
-  doc.setTextColor(
-    assessment === 'REQUIRES ATTENTION' ? 255 : 0,
-    assessment === 'REQUIRES ATTENTION' ? 255 : 0,
-    assessment === 'REQUIRES ATTENTION' ? 255 : 0
+  // Transliteration disclaimer: the PDF font cannot render non-Latin scripts, so
+  // names are transliterated and unrenderable characters are marked "[?]". The exact
+  // characters are preserved in the on-screen report and the JSON export.
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'italic');
+  doc.setTextColor(...COLORS.gray);
+  const disclaimerLines = doc.splitTextToSize(
+    'Names in non-Latin scripts are transliterated to Latin for display ("[?]" marks characters that could not be rendered). The JSON export preserves the exact original characters.',
+    pageWidth - margin * 2
   );
-  doc.rect(margin + aWidth + 2, y - 5, 50, 8, 'F');
-  doc.setFontSize(9);
-  doc.text(assessment, margin + aWidth + 27, y - 0.5, { align: 'center' });
+  doc.text(disclaimerLines, pageWidth / 2, y, { align: 'center' });
+  y += disclaimerLines.length * 3.5 + 8;
+  doc.setFont('helvetica', 'normal');
   doc.setTextColor(...COLORS.black);
-  y += 10;
 
-  bodyText(`Documents Analyzed: ${exec.documents_analyzed}`);
-  if (exec.document_types?.length) {
-    bodyText(`Document Types: ${exec.document_types.join(', ')}`);
-  }
-  bodyText(exec.overview || '');
-  y += 2;
-
-  subTitle('Key Findings:');
-  for (const finding of exec.key_findings || []) {
-    bullet(finding);
-  }
-  y += 5;
-
-  // ── 2. Personal Information Concordance ───────────────────────────────
+  // ── 1. Personal Information Concordance ───────────────────────────────
 
   const concordance = report.personal_info_concordance;
-  sectionTitle('2. PERSONAL INFORMATION CONCORDANCE');
+  sectionTitle('1. PERSONAL INFORMATION CONCORDANCE');
   bodyText(concordance?.consistency_summary || '');
   y += 3;
 
-  const table = concordance?.comparison_table;
-  if (table?.length) {
-    const numDocs = table[0].values_by_document?.length || 0;
-    const head = [
-      'Field',
-      ...Array.from({ length: Math.min(numDocs, 3) }, (_, i) => `Doc ${i + 1}`),
-      'Status',
-    ];
-
-    const body = table.map(row => {
-      const vals = row.values_by_document || [];
-      const docVals = Array.from({ length: Math.min(numDocs, 3) }, (_, i) => {
-        const v = vals[i];
-        return sanitize(v?.translated || v?.original || 'N/A').slice(0, 35);
-      });
+  const buildConcordanceAutoTable = (
+    rows: NonNullable<typeof concordance>['comparison_table'],
+    label?: string
+  ) => {
+    if (!rows?.length) return;
+    if (label) subTitle(label);
+    const head = ['Field', 'Values by Document', 'Status', 'Note'];
+    const body = rows.map(row => {
+      const values = (row.values_by_document || [])
+        .map(v => {
+          const docName = sanitize(
+            v.document
+              ? (v.document.split('/').pop()?.split('\\').pop() ?? v.document)
+              : 'Document'
+          );
+          const display = sanitize(v.translated || v.original || 'N/A');
+          const legNote =
+            v.legibility === 'Poor'
+              ? ' (⚠ Poor legibility)'
+              : v.legibility === 'Fair'
+                ? ' (⚠ Fair legibility)'
+                : '';
+          return `${docName}: ${display}${legNote}`;
+        })
+        .join('\n');
       return [
-        sanitize(row.field).slice(0, 25),
-        ...docVals,
-        row.is_consistent ? 'MATCH' : 'MISMATCH',
+        sanitize(row.field).slice(0, 28),
+        values || 'N/A',
+        row.status === 'consistent'
+          ? 'Consistent'
+          : row.status === 'inconsistent'
+            ? 'Inconsistent'
+            : row.status === 'missing_info'
+              ? 'Missing info'
+              : 'Needs review',
+        sanitize(row.note || ''),
       ];
     });
-
     autoTable(doc, {
       startY: y,
       head: [head],
@@ -210,58 +225,154 @@ export function exportReportAsPdf(
       margin: { left: margin, right: margin },
       styles: { fontSize: 8, cellPadding: 2 },
       headStyles: { fillColor: COLORS.navy, textColor: COLORS.white },
+      columnStyles: {
+        0: { cellWidth: 35 },
+        1: { cellWidth: 95 },
+        2: { cellWidth: 20, halign: 'center' },
+      },
       didParseCell: data => {
-        if (data.section === 'body' && data.column.index === head.length - 1) {
+        if (data.section === 'body' && data.column.index === 2) {
           const val = data.cell.raw as string;
           data.cell.styles.fillColor =
-            val === 'MATCH' ? COLORS.lightGreen : COLORS.lightRed;
+            val === 'Consistent'
+              ? COLORS.lightGreen
+              : val === 'Inconsistent'
+                ? COLORS.lightRed
+                : val === 'Missing info'
+                  ? ([255, 213, 153] as [number, number, number])
+                  : ([255, 236, 153] as [number, number, number]);
         }
       },
     });
     y = doc.lastAutoTable.finalY + 8;
+  };
+
+  if (concordance?.byMember?.length) {
+    // Family mode: one sub-table per member
+    for (const memberConc of concordance.byMember) {
+      checkPageBreak(20);
+      const memberLabel = `${memberConc.memberName}: ${memberConc.consistency_summary}`;
+      if (memberConc.comparison_table.length > 0) {
+        buildConcordanceAutoTable(memberConc.comparison_table, memberLabel);
+      } else {
+        subTitle(memberLabel);
+        bodyText('No cross-document field comparisons for this member.', 3);
+        y += 4;
+      }
+    }
+  } else {
+    // Non-family mode: flat table
+    const table = concordance?.comparison_table;
+    buildConcordanceAutoTable(table ?? []);
   }
 
-  // ── 3. Document-by-Document Analysis ──────────────────────────────────
+  // ── 2. Per-Document Discrepancies ─────────────────────────────────────
 
-  sectionTitle('3. DOCUMENT-BY-DOCUMENT ANALYSIS');
+  const perDoc = report.per_document_discrepancies;
+  if (perDoc?.length) {
+    sectionTitle('2. PER-DOCUMENT DISCREPANCIES');
 
-  for (const da of report.document_analysis || []) {
-    subTitle(`Document: ${da.document_name}`);
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-    bodyText(
-      `Type: ${da.document_type || 'N/A'}  |  Authority: ${da.issuing_authority || 'N/A'}`
-    );
-    bodyText(
-      `Issue Date: ${da.issue_date || 'N/A'}  |  Validity: ${da.validity || 'N/A'}  |  Legibility: ${da.legibility_assessment || 'N/A'}`
-    );
+    for (const item of perDoc) {
+      subTitle(`Document: ${item.document_name}`);
+      bodyText(
+        item.summary || 'No material document-level discrepancies detected.'
+      );
 
-    if (da.translation_notes) {
-      doc.setFont('helvetica', 'italic');
-      bodyText(`Translation Notes: ${da.translation_notes}`);
-      doc.setFont('helvetica', 'normal');
-    }
-
-    if (da.flags?.length) {
-      doc.setFont('helvetica', 'bold');
-      doc.setTextColor(...COLORS.red);
-      checkPageBreak(8);
-      doc.text('Flags/Concerns:', margin, y);
-      y += 5;
-      doc.setTextColor(...COLORS.black);
-      doc.setFont('helvetica', 'normal');
-      for (const flag of da.flags) {
-        bullet(flag, 8);
+      if (item.discrepancies?.length) {
+        // Discrepancies are pre-sorted most-important-first; no severity label shown.
+        for (const d of item.discrepancies) {
+          doc.setFont('helvetica', 'normal');
+          bodyText(`${d.discrepancy_type}: ${d.description}`, 3);
+          if (d.fields_involved?.length) {
+            bodyText(`Fields: ${d.fields_involved.join(', ')}`, 6);
+          }
+          if (d.original_values?.length) {
+            bodyText(`Values: ${d.original_values.join(' vs ')}`, 6);
+          }
+          bodyText(`Recommendation: ${d.recommendation || 'N/A'}`, 6);
+          y += 2;
+        }
+      } else {
+        bodyText('No discrepancy items.', 3);
       }
+      y += 4;
+    }
+  }
+
+  // ── Scope of Analysis (how the request was interpreted) ───────────────
+
+  const scope = report.analysis_scope;
+  if (scope) {
+    sectionTitle('SCOPE OF ANALYSIS');
+    bodyText(
+      'How your request was interpreted — confirm this matches your intent:'
+    );
+    bodyText(scope.interpretation || '');
+    if (scope.derivedChecks?.length) {
+      subTitle('Checks performed:');
+      for (const c of scope.derivedChecks) bullet(c);
+    }
+    if (scope.assumptions?.length) {
+      subTitle('Assumptions made (verify):');
+      for (const a of scope.assumptions) bullet(a);
     }
     y += 5;
   }
 
-  // ── 4. Cross-Document Discrepancies ───────────────────────────────────
+  // ── User-Requested Checks ─────────────────────────────────────────────
+
+  const userChecks = report.user_requested_checks;
+  if (userChecks?.length) {
+    sectionTitle('USER-REQUESTED CHECKS');
+
+    for (let i = 0; i < userChecks.length; i++) {
+      const check = userChecks[i];
+      checkPageBreak(30);
+
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${i + 1}. ${sanitize(check.requestedBy)}`, margin, y);
+
+      // Finding badge
+      const findingColor: [number, number, number] =
+        check.finding === 'consistent'
+          ? COLORS.lightGreen
+          : check.finding === 'inconsistent'
+            ? COLORS.lightRed
+            : [255, 236, 153];
+      const badgeX = pageWidth - margin - 28;
+      doc.setFillColor(...findingColor);
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(...COLORS.black);
+      doc.rect(badgeX, y - 4, 28, 6, 'F');
+      doc.text(check.finding, badgeX + 14, y, { align: 'center' });
+      y += 7;
+
+      doc.setFont('helvetica', 'normal');
+      bodyText(check.description);
+      if (check.documentsInvolved?.length) {
+        bodyText(`Documents: ${check.documentsInvolved.join(', ')}`);
+      }
+      y += 3;
+    }
+  }
+
+  // ── 3. Cross-Document Discrepancies ───────────────────────────────────
 
   const discrepancies = report.cross_document_discrepancies;
   if (discrepancies?.length) {
-    sectionTitle('4. CROSS-DOCUMENT DISCREPANCIES');
+    const sec4Title = report.familyCrossReference
+      ? '3. WITHIN-MEMBER CROSS-DOCUMENT DISCREPANCIES'
+      : '3. CROSS-DOCUMENT DISCREPANCIES';
+    sectionTitle(sec4Title);
+    if (report.familyCrossReference) {
+      bodyText(
+        "These discrepancies are within a single family member's own documents. Cross-member discrepancies are in Section 5 (Family Cross-Reference).",
+        3
+      );
+      y += 2;
+    }
 
     for (let i = 0; i < discrepancies.length; i++) {
       const disc = discrepancies[i];
@@ -274,18 +385,6 @@ export function exportReportAsPdf(
         margin,
         y
       );
-
-      // Severity badge
-      const sevColor = getSeverityColor(disc.severity);
-      const badgeX = pageWidth - margin - 22;
-      doc.setFillColor(...sevColor);
-      doc.setFontSize(8);
-      doc.setFont('helvetica', 'bold');
-      const textFill = disc.severity === 'High' ? COLORS.white : COLORS.black;
-      doc.setTextColor(...textFill);
-      doc.rect(badgeX, y - 4, 22, 6, 'F');
-      doc.text(disc.severity, badgeX + 11, y, { align: 'center' });
-      doc.setTextColor(...COLORS.black);
       y += 7;
 
       doc.setFont('helvetica', 'normal');
@@ -303,73 +402,150 @@ export function exportReportAsPdf(
     }
   }
 
-  // ── 5. Translation Notes ──────────────────────────────────────────────
+  // ── 4. Family Cross-Reference ─────────────────────────────────────────
 
-  const tn = report.translation_notes;
-  if (tn) {
-    sectionTitle('5. TRANSLATION ACCURACY NOTES');
-    bodyText(
-      `Overall Translation Confidence: ${tn.overall_translation_confidence || 'N/A'}`
-    );
+  const fc = report.familyCrossReference;
+  if (fc) {
+    sectionTitle('4. FAMILY CROSS-REFERENCE');
+    bodyText(fc.summary || '');
+    y += 3;
 
-    if (tn.ambiguous_terms?.length) {
-      subTitle('Ambiguous Terms:');
-      for (const t of tn.ambiguous_terms) {
-        bullet(`${t.term}: ${t.possible_translations?.join(', ') || ''}`);
+    // Family members
+    if (fc.familyMembers?.length) {
+      subTitle('Family Members:');
+      for (const m of fc.familyMembers) {
+        const docs = m.assignedDocuments?.join(', ') || 'none assigned';
+        bullet(`${m.name}${m.role ? ` (${m.role})` : ''}: ${docs}`);
       }
       y += 3;
     }
 
-    if (tn.cultural_legal_terms?.length) {
-      subTitle('Cultural/Legal Terms:');
-      for (const t of tn.cultural_legal_terms) {
-        bullet(`${t.term}: ${t.explanation}`);
+    // Relationships table — only render rows that actually name a relationship
+    // (an empty/garbled relationship would otherwise show as a blank grey row).
+    const relRows = (fc.inferredRelationships ?? [])
+      .map(r => {
+        const fromName =
+          fc.familyMembers?.find(m => m.id === r.fromId)?.name ?? r.fromId;
+        const toName =
+          fc.familyMembers?.find(m => m.id === r.toId)?.name ?? r.toId;
+        return [
+          sanitize(fromName),
+          sanitize(r.relationshipType),
+          sanitize(toName),
+          sanitize(r.confidence),
+        ];
+      })
+      .filter(row => row[0] && row[1] && row[2]);
+    if (relRows.length) {
+      subTitle('Relationships:');
+      autoTable(doc, {
+        startY: y,
+        head: [['Member', 'Is', 'Related To', 'Confidence']],
+        body: relRows,
+        margin: { left: margin, right: margin },
+        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' },
+        headStyles: { fillColor: COLORS.navy, textColor: COLORS.white },
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+
+    // Shared field comparisons table
+    if (fc.sharedFieldComparisons?.some(c => c.values?.length)) {
+      subTitle('Shared Field Comparisons:');
+      autoTable(doc, {
+        startY: y,
+        head: [['Field', 'Member', 'Value', 'Consistent']],
+        body: fc.sharedFieldComparisons.flatMap(cmp =>
+          cmp.values.map((v, vi) => [
+            vi === 0 ? sanitize(cmp.field) : '',
+            sanitize(v.memberName),
+            sanitize(v.value).slice(0, 40),
+            vi === 0 ? (cmp.isConsistent ? 'Yes' : 'No') : '',
+          ])
+        ),
+        margin: { left: margin, right: margin },
+        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' },
+        headStyles: { fillColor: COLORS.navy, textColor: COLORS.white },
+        didParseCell: data => {
+          if (data.section === 'body' && data.column.index === 3) {
+            const val = data.cell.raw as string;
+            if (val === 'Yes') data.cell.styles.fillColor = COLORS.lightGreen;
+            else if (val === 'No') data.cell.styles.fillColor = COLORS.lightRed;
+          }
+        },
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+
+    // Cross-person discrepancies (pre-sorted most-important-first; no severity label)
+    if (fc.crossPersonDiscrepancies?.length) {
+      subTitle('Cross-Person Discrepancies:');
+      for (const d of fc.crossPersonDiscrepancies) {
+        checkPageBreak(20);
+        const affected = (d.affectedMemberIds ?? [])
+          .map(id => fc.familyMembers?.find(m => m.id === id)?.name ?? id)
+          .join(' x ');
+        doc.setFont('helvetica', 'bold');
+        bodyText(d.discrepancy_type, 3);
+        doc.setFont('helvetica', 'normal');
+        bodyText(d.description, 6);
+        if (affected) bodyText(`Affects: ${affected}`, 6);
+        if (d.documents_involved?.length) {
+          bodyText(`Documents: ${d.documents_involved.join(', ')}`, 6);
+        }
+        if (d.recommendation)
+          bodyText(`Recommendation: ${d.recommendation}`, 6);
+        y += 2;
       }
       y += 3;
     }
 
-    if (tn.uncertain_readings?.length) {
-      subTitle('Uncertain/Hard-to-Read Sections:');
-      for (const item of tn.uncertain_readings) {
-        bullet(item);
-      }
+    // Unattributed documents — still analyzed, just not tied to a member.
+    if (fc.unassignedDocuments?.length) {
+      subTitle('Unattributed Documents (still analyzed):');
+      bodyText(fc.unassignedDocuments.join(', '), 3);
+      y += 3;
     }
     y += 5;
   }
 
-  // ── 6. Action Items ───────────────────────────────────────────────────
+  // ── 5. Timeline & Chronology ──────────────────────────────────────────
 
-  const actions = report.action_items;
-  if (actions?.length) {
-    sectionTitle('6. ACTION ITEMS');
-
-    for (const priority of ['High', 'Medium', 'Low']) {
-      const items = actions.filter(a => a.priority === priority);
-      if (!items.length) continue;
-
-      subTitle(`${priority} Priority:`);
-      for (const item of items) {
-        bullet(`[${item.category}] ${item.action}`);
-        if (item.reason) {
-          doc.setFontSize(8);
-          doc.setFont('helvetica', 'italic');
-          const reasonLines = doc.splitTextToSize(
-            `Reason: ${sanitize(item.reason)}`,
-            contentWidth - 12
-          );
-          checkPageBreak(reasonLines.length * 4);
-          doc.text(reasonLines, margin + 12, y);
-          y += reasonLines.length * 4;
-          doc.setFont('helvetica', 'normal');
+  const timeline = report.timeline;
+  if (
+    timeline &&
+    (timeline.events.length > 0 || timeline.contradictions.length > 0)
+  ) {
+    sectionTitle('5. TIMELINE & CHRONOLOGY');
+    if (timeline.summary) bodyText(timeline.summary);
+    if (timeline.contradictions.length > 0) {
+      subTitle('Chronological issues:');
+      for (const c of timeline.contradictions) {
+        bodyText(c.description, 3);
+        if (c.documents_involved?.length) {
+          bodyText(`Documents: ${c.documents_involved.join(', ')}`, 6);
         }
+        y += 1;
+      }
+      y += 2;
+    }
+    if (timeline.events.length > 0) {
+      subTitle('Events:');
+      for (const e of timeline.events) {
+        const who = e.memberName ? ` (${e.memberName})` : '';
+        bullet(`${e.date || '—'} — ${e.label}${who} [${e.document}]`);
       }
       y += 3;
     }
+    y += 3;
   }
 
   // ── Disclaimer ────────────────────────────────────────────────────────
 
-  doc.addPage();
+  // Start the disclaimer on the current page if it fits; only break to a new
+  // page when there isn't room. An unconditional addPage() here produced a
+  // stray blank page when the prior section already ended near a page boundary.
+  checkPageBreak(60);
   sectionTitle('DISCLAIMER');
   doc.setFontSize(9);
   doc.setFont('helvetica', 'italic');

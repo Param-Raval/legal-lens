@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkDiscrepancies } from '@/lib/ai-client';
+import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import type { ParsedIntent } from '@/types';
 import { z } from 'zod';
 
 // Allow up to 60s for AI discrepancy analysis
@@ -11,17 +13,43 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
+const FieldFindingSchema = z.object({
+  field: z.string(),
+  canonicalName: z.string(),
+  status: z.enum(['consistent', 'inconsistent', 'missing_info', 'requires_review']),
+  note: z.string().nullable(),
+  documentsInvolved: z.array(z.string()),
+  valuesByDocument: z.array(z.object({
+    document: z.string(),
+    original: z.string(),
+    translated: z.string(),
+  })),
+  severity: z.enum(['High', 'Medium', 'Low']).optional(),
+});
+
 const DiscrepancySchema = z.object({
   hasDiscrepancies: z.boolean(),
   summary: z.string(),
+  fieldFindings: z.array(FieldFindingSchema).optional(),
+  classificationFailed: z.boolean().optional(),
 });
 
 export async function POST(request: NextRequest) {
   try {
+    const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
+    if (tooLarge) return tooLarge;
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let documents: any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let familyGraph: any | undefined;
+    let parsedIntent: ParsedIntent | undefined;
+    let perDocNotes: Array<{ fileName: string; notes: string }> | undefined;
+    let docLegibility:
+      | Array<{ name: string; legibility?: 'Good' | 'Fair' | 'Poor'; isHandwritten?: boolean }>
+      | undefined;
     try {
-      ({ documents } = await request.json());
+      ({ documents, familyGraph, parsedIntent, perDocNotes, docLegibility } = await request.json());
     } catch {
       return NextResponse.json(
         { error: 'Request body must be valid JSON' },
@@ -36,14 +64,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await checkDiscrepancies(documents);
+    const result = await checkDiscrepancies(documents, familyGraph, parsedIntent, perDocNotes, docLegibility);
     const validatedResponse = DiscrepancySchema.parse(result);
     return NextResponse.json(validatedResponse, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Analysis failed';
-    return NextResponse.json(
-      { error: message },
-      { status: 500, headers: PRIVACY_HEADERS }
-    );
+    return safeErrorResponse(error, PRIVACY_HEADERS);
   }
 }

@@ -14,9 +14,10 @@ import {
   ChevronRight,
   ChevronDown,
   FileText,
+  StickyNote,
 } from 'lucide-react';
-import { FileInfo } from '@/types';
-import { formatFileSize, canAnalyzeFile } from '@/lib/utils';
+import { FileInfo, FamilyMember } from '@/types';
+import { formatFileSize, canAnalyzeFile, canTranslateFile, getMemberColorClasses } from '@/lib/utils';
 
 const LANGUAGE_OPTIONS = [
   { value: '', label: 'Auto-detect' },
@@ -49,6 +50,13 @@ interface FileListProps {
   onAnalyze: (index: number) => void;
   onTranslate: (index: number) => void;
   onSetLanguage: (index: number, lang: string) => void;
+  onRemove: (indexOrGroupId: number | string) => void;
+  // Family mode
+  familyModeEnabled?: boolean;
+  familyMembers?: FamilyMember[];
+  onAssignMember?: (groupId: string, memberId: string) => void;
+  // Per-document notes
+  onUpdateFileNotes?: (fileId: string, notes: string) => void;
 }
 
 /** A visual group: either a multi-page PDF or a single standalone file. */
@@ -68,8 +76,56 @@ export const FileList = ({
   onAnalyze,
   onTranslate,
   onSetLanguage,
+  onRemove,
+  familyModeEnabled = false,
+  familyMembers = [],
+  onAssignMember,
+  onUpdateFileNotes,
 }: FileListProps) => {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [openNotesId, setOpenNotesId] = useState<string | null>(null);
+
+  /** Render the family assignment dropdown + badge for a group. */
+  const renderFamilyAssignment = (groupId: string, assignedMemberId?: string) => {
+    if (!familyModeEnabled) return null;
+    const assignedMember = familyMembers.find(m => m.id === assignedMemberId);
+    const colors = assignedMember ? getMemberColorClasses(assignedMember.color) : null;
+    return (
+      <div className="flex items-center gap-1.5">
+        {assignedMember && colors ? (
+          <Badge
+            variant="outline"
+            className={`text-[10px] px-1.5 py-0 flex items-center gap-1 ${colors.bg} ${colors.text} ${colors.border}`}
+          >
+            <span className={`inline-block h-2 w-2 rounded-full ${colors.dot}`} />
+            {assignedMember.name}
+          </Badge>
+        ) : (
+          <Badge
+            variant="outline"
+            className="text-[10px] px-1.5 py-0 bg-amber-50 text-amber-700 border-amber-200"
+          >
+            Unassigned
+          </Badge>
+        )}
+        {familyMembers.length > 0 && onAssignMember && (
+          <select
+            className="h-7 text-xs border rounded px-1.5 bg-background text-foreground"
+            value={assignedMemberId ?? ''}
+            onChange={e => onAssignMember(groupId, e.target.value)}
+            title="Assign to family member"
+          >
+            <option value="">— Unassign —</option>
+            {familyMembers.map(m => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+    );
+  };
 
   /** Build ordered groups: multi-page PDFs are grouped; standalone files are their own group. */
   const groups: FileGroup[] = useMemo(() => {
@@ -123,16 +179,15 @@ export const FileList = ({
   if (files.length === 0) return null;
 
   /** Render a single file row (used for both standalone files and PDF page rows). */
-  const renderFileRow = (file: FileInfo, index: number, indent: boolean) => {
-    const needsTranslation =
-      file.analysis &&
-      file.analysis.document_language !== 'en' &&
-      !file.translation;
+  const renderFileRow = (file: FileInfo, index: number, indent: boolean, showFamilyAssignment = false, isPdfPage = false, groupId?: string) => {
+    const needsTranslation = canTranslateFile(file);
+    const notesOpen = openNotesId === file.id;
+    const hasNotes = !!file.userNotes;
 
     return (
+      <div key={file.id} className={`${indent ? 'ml-6' : ''} space-y-1`}>
       <div
-        key={file.id}
-        className={`flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 ${indent ? 'ml-6 border-dashed' : ''}`}
+        className={`flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 ${indent ? 'border-dashed' : ''}`}
       >
         <div className="flex items-center space-x-3 flex-1 min-w-0">
           <File className="h-5 w-5 text-muted-foreground shrink-0" />
@@ -159,6 +214,7 @@ export const FileList = ({
         </div>
 
         <div className="flex items-center space-x-2">
+          {showFamilyAssignment && renderFamilyAssignment(file.id, file.familyMemberId)}
           {/* Language hint — only show for standalone (non-PDF) files;
               PDF pages inherit the hint from the group header. */}
           {!file.pdfSourceId && (
@@ -226,7 +282,41 @@ export const FileList = ({
               )}
             </Button>
           )}
+
+          {onUpdateFileNotes && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setOpenNotesId(notesOpen ? null : file.id)}
+              title="Add notes for this document"
+              className={hasNotes ? 'text-amber-600 border-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950 dark:border-amber-700 dark:text-amber-400' : ''}
+            >
+              <StickyNote className="h-4 w-4" />
+            </Button>
+          )}
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onRemove(isPdfPage && groupId ? groupId : index)}
+            title="Remove this file"
+            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+          >
+            ✕
+          </Button>
         </div>
+      </div>
+      {notesOpen && onUpdateFileNotes && (
+        <textarea
+          value={file.userNotes ?? ''}
+          onChange={e => onUpdateFileNotes(file.id, e.target.value)}
+          rows={2}
+          placeholder="Notes for this document (used to guide AI analysis)"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y"
+          // eslint-disable-next-line jsx-a11y/no-autofocus
+          autoFocus
+        />
+      )}
       </div>
     );
   };
@@ -242,7 +332,7 @@ export const FileList = ({
             // Standalone file — render directly
             if (!group.isPdf) {
               const idx = group.indices[0];
-              return renderFileRow(files[idx], idx, false);
+              return renderFileRow(files[idx], idx, false, true, false);
             }
 
             // PDF group — collapsible header + child pages
@@ -286,6 +376,7 @@ export const FileList = ({
                   </div>
 
                   <div className="flex items-center space-x-2">
+                    {renderFamilyAssignment(group.key, files[firstIdx]?.familyMemberId)}
                     {/* Shared language hint for all pages */}
                     <select
                       className="h-7 text-xs border rounded px-1.5 bg-background text-foreground"
@@ -307,13 +398,51 @@ export const FileList = ({
                           All OCR&apos;d
                         </Badge>
                       )}
+
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onRemove(group.key)}
+                      title="Remove entire PDF file"
+                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                    >
+                      ✕
+                    </Button>
+
+                    {onUpdateFileNotes && (() => {
+                      const groupHasNotes = !!files[firstIdx]?.userNotes;
+                      const groupNotesOpen = openNotesId === group.key;
+                      return (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setOpenNotesId(groupNotesOpen ? null : group.key)}
+                          title="Add notes for this document"
+                          className={groupHasNotes ? 'text-amber-600 border-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950 dark:border-amber-700 dark:text-amber-400' : ''}
+                        >
+                          <StickyNote className="h-4 w-4" />
+                        </Button>
+                      );
+                    })()}
                   </div>
                 </div>
+
+                {/* Group-level notes textarea */}
+                {openNotesId === group.key && onUpdateFileNotes && (
+                  <textarea
+                    value={files[firstIdx]?.userNotes ?? ''}
+                    onChange={e => onUpdateFileNotes(files[firstIdx].id, e.target.value)}
+                    rows={2}
+                    placeholder="Notes for this document (used to guide AI analysis)"
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y"
+                    autoFocus
+                  />
+                )}
 
                 {/* Expanded page rows */}
                 {expanded &&
                   group.indices.map(idx =>
-                    renderFileRow(files[idx], idx, true)
+                    renderFileRow(files[idx], idx, true, false, true, group.key)
                   )}
               </div>
             );
