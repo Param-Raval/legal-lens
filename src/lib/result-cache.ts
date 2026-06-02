@@ -23,7 +23,7 @@ import type { OCRResult, TranslationResult } from '@/types';
  * alter output. It is part of every cache key, so bumping it transparently
  * invalidates all previously cached results.
  */
-export const PROMPT_VERSION = 'v1';
+export const PROMPT_VERSION = 'v2';
 
 const DB_NAME = 'legal-lens-cache';
 const DB_VERSION = 1;

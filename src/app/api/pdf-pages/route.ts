@@ -6,15 +6,19 @@ import {
   MAX_UPLOAD_BYTES,
 } from '@/lib/api-guard';
 
-// Allow up to 30s for multi-page PDF rendering
-export const maxDuration = 30;
+// Allow up to 60s for multi-page PDF rendering (25 pages at 1.5x scale needs room).
+export const maxDuration = 60;
 
 const PRIVACY_HEADERS = {
   'Cache-Control': 'private, no-store, no-cache, must-revalidate',
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-const MAX_PAGES = 10;
+/**
+ * Maximum pages extracted per PDF.
+ * Must stay in sync with MAX_PAGES in src/lib/pdf-extract.ts.
+ */
+const MAX_PAGES = 25;
 const RENDER_SCALE = 1.5;
 const JPEG_QUALITY = 0.85;
 /**
@@ -57,6 +61,46 @@ function isUsableTextLayer(raw: string): boolean {
   if (controls / total > 0.02) return false; // broken encoding
   if (lettersAndDigits / total < 0.4) return false; // mostly symbols → not real text
   return true;
+}
+
+/**
+ * Derive a readable label from an XFA/AcroForm field name like
+ * "form1[0].#subform[0].PtAILine4_LastName[0]" → "LastName". Returns '' for
+ * generic auto-names (TextField3, Cell1) where only the value carries signal.
+ */
+function cleanFieldLabel(fieldName: string): string {
+  let s = (fieldName.split('.').pop() ?? '').replace(/\[\d+\]$/, '');
+  s = s.replace(/^Pt[A-Z]+Line\d+_?/i, ''); // strip "PtAIILine5_" section prefixes
+  if (/^(TextField|Cell|Table|Subform|RadioButtonList|CheckBox\w*|p\d|f\d)\d*$/i.test(s))
+    return '';
+  return s.replace(/_/g, ' ').trim();
+}
+
+/**
+ * Pull filled AcroForm/XFA widget values from a page as readable "Label: value"
+ * lines. These carry the applicant's typed answers, which getTextContent() does
+ * NOT return (the content stream holds only the blank template). Skips empty/Off
+ * checkboxes and the form's PDF417 barcodes. Deduplicated, order-preserved.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractWidgetLines(annotations: any[]): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const a of annotations) {
+    const raw = a?.fieldValue;
+    const value = (Array.isArray(raw) ? raw.join(', ') : typeof raw === 'string' ? raw : '')
+      .trim()
+      .replace(/\s+/g, ' ');
+    if (!value || value === 'Off') continue;
+    const name = String(a?.fieldName ?? '');
+    if (/barcode/i.test(name) || /^I-\d+\|/.test(value)) continue; // form barcodes
+    const label = cleanFieldLabel(name);
+    const line = label ? `${label}: ${value}` : value;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    lines.push(line);
+  }
+  return lines;
 }
 
 export async function POST(request: NextRequest) {
@@ -195,7 +239,33 @@ export async function POST(request: NextRequest) {
         } catch {
           textLayer = '';
         }
-        const hasTextLayer = isUsableTextLayer(textLayer);
+
+        // Fillable forms (e.g. USCIS I-589) store the applicant's typed answers
+        // in AcroForm/XFA widget values, NOT the content stream — getTextContent
+        // returns only the blank template. Merge the widget values so the
+        // born-digital text path captures the actual answers instead of routing
+        // a near-empty page (or, for image-rendered forms, a blank render) to OCR.
+        let widgetText = '';
+        try {
+          const lines = extractWidgetLines(await page.getAnnotations());
+          if (lines.length) widgetText = '[Form field values]\n' + lines.join('\n');
+        } catch {
+          widgetText = '';
+        }
+
+        // Decide the page's text. Keep the corruption-safety rule: a populated-
+        // but-garbled content layer still falls back to image OCR. But widget
+        // values are clean structured data — include them whenever present, and
+        // allow a page whose content stream is essentially empty (a pure fillable
+        // form) to still take the text path on widget values alone.
+        const contentUsable = isUsableTextLayer(textLayer);
+        const contentEmpty =
+          textLayer.replace(/\s/g, '').length < MIN_TEXT_LAYER_CHARS;
+        const parts: string[] = [];
+        if (contentUsable) parts.push(textLayer);
+        if (widgetText && (contentUsable || contentEmpty)) parts.push(widgetText);
+        const combinedText = parts.join('\n\n').trim();
+        const hasTextLayer = combinedText.length >= MIN_TEXT_LAYER_CHARS;
 
         const viewport = page.getViewport({ scale: RENDER_SCALE });
 
@@ -221,7 +291,7 @@ export async function POST(request: NextRequest) {
           jpeg: jpegBuffer.toString('base64'),
           width,
           height,
-          text: hasTextLayer ? textLayer : '',
+          text: hasTextLayer ? combinedText : '',
         });
       }
 

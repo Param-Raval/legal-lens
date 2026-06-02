@@ -207,6 +207,14 @@ export interface FileInfo {
    * the image tokens. Absent for scanned pages (no usable text layer).
    */
   pdfTextLayer?: string;
+  /**
+   * True for pages 2..N of a born-digital multi-page PDF whose content was
+   * analyzed in ONE whole-document call (the result lives on page 1). Keeps
+   * different people's fields correctly attributed across sections (applicant
+   * vs. spouse vs. children) instead of conflating them per page. These pages
+   * carry a minimal placeholder analysis so they are not re-analyzed.
+   */
+  pdfWholeCovered?: boolean;
   /** Family member this document is assigned to (family mode only) */
   familyMemberId?: string;
   /** Optional user-provided notes describing this document's context */

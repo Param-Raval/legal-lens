@@ -11,8 +11,12 @@
  */
 import type { FileInfo } from '@/types';
 
-/** Maximum number of pages extracted per PDF. */
-const MAX_PAGES = 10;
+/**
+ * Maximum number of pages extracted per PDF.
+ * Must stay in sync with MAX_PAGES in src/app/api/pdf-pages/route.ts.
+ * 25 pages covers all common immigration forms (I-589 is 12 pages).
+ */
+const MAX_PAGES = 25;
 
 export interface PdfExtractionResult {
   pages: FileInfo[];

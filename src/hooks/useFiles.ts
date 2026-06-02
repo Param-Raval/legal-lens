@@ -39,6 +39,65 @@ class AbortedError extends Error {
   }
 }
 
+// ── Whole-document analysis for born-digital multi-page PDFs ────────────────
+
+type WholeDocPlan = Map<string, { combinedText?: string; coveredBy?: string }>;
+
+/**
+ * Plan whole-document analysis for born-digital multi-page PDFs.
+ *
+ * A USCIS-style form describes several people (applicant, spouse, children,
+ * parents, siblings) in clearly labeled sections. Analyzing each page in
+ * isolation makes the model treat e.g. the spouse page as its own subject, so
+ * the applicant's and spouse's fields collapse into the same buckets and get
+ * flagged as false conflicts. Sending ALL pages in ONE call gives the model the
+ * context to attribute each field to the correct person (and is cheaper than N
+ * per-page calls).
+ *
+ * Returns a map keyed by FileInfo.id:
+ *   { combinedText } — group LEAD page: send this text (all pages) in one call.
+ *   { coveredBy }    — covered by the lead; skip the API entirely.
+ * Only groups where every page is born-digital (has a text layer) AND there is
+ * more than one page are planned; scanned/mixed/single-page keep per-page OCR.
+ */
+function buildWholeDocPdfPlan(fileList: FileInfo[]): WholeDocPlan {
+  const bySource = new Map<string, FileInfo[]>();
+  for (const f of fileList) {
+    if (!f.pdfSourceId) continue;
+    const arr = bySource.get(f.pdfSourceId);
+    if (arr) arr.push(f);
+    else bySource.set(f.pdfSourceId, [f]);
+  }
+  const plan: WholeDocPlan = new Map();
+  for (const pages of bySource.values()) {
+    if (pages.length < 2) continue; // single page → per-page is fine
+    if (pages.some(f => !f.pdfTextLayer)) continue; // scanned/mixed → vision OCR per page
+    const sorted = [...pages].sort(
+      (a, b) => (a.pdfPageNumber ?? 0) - (b.pdfPageNumber ?? 0)
+    );
+    const combinedText = sorted
+      .map(f => `--- Page ${f.pdfPageNumber ?? 1} ---\n${f.pdfTextLayer}`)
+      .join('\n\n');
+    plan.set(sorted[0].id, { combinedText });
+    for (const f of sorted.slice(1)) plan.set(f.id, { coveredBy: sorted[0].id });
+  }
+  return plan;
+}
+
+/**
+ * Minimal placeholder analysis for pages covered by a whole-document lead.
+ * Contributes no fields/text to the group; language 'en' so it is never queued
+ * for translation (the lead page carries the full text + any translation).
+ */
+function coveredPageAnalysis(): OCRResult {
+  return {
+    text: '',
+    document_type: '',
+    document_language: 'en',
+    structured_data: { fields: [] },
+  };
+}
+
 // ── Folder-path helpers (for family member seeding from folder structure) ──
 
 /**
@@ -88,6 +147,8 @@ const CLIENT_MAX_RETRIES = 6;
 const CLIENT_BASE_DELAY_S = 10;
 /** Cooldown between sequential API calls to avoid rate-limit bursts (ms). */
 const INTER_REQUEST_DELAY_MS = 2000;
+/** OCR requests fired concurrently per batch; cooldown applied between batches (was 1). */
+const PIPELINE_OCR_BATCH_SIZE = 2;
 
 const WORD_NAMESPACE =
   'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -860,6 +921,49 @@ export const useFiles = () => {
       });
 
       try {
+        // If this page belongs to a born-digital multi-page PDF, analyze the
+        // WHOLE document in one call (correct per-person attribution) and mark
+        // the other pages covered, rather than analyzing this page alone.
+        const wholeDocPlan = buildWholeDocPdfPlan(files);
+        const planEntry = wholeDocPlan.get(file.id);
+        if (planEntry && (planEntry.combinedText || planEntry.coveredBy)) {
+          const leadId = planEntry.combinedText ? file.id : planEntry.coveredBy!;
+          const leadFile = files.find(f => f.id === leadId);
+          const leadText =
+            wholeDocPlan.get(leadId)?.combinedText ?? planEntry.combinedText;
+          const formData = new FormData();
+          formData.append('pdfText', leadText!);
+          if (leadFile?.languageHint)
+            formData.append('languageHint', leadFile.languageHint);
+          const response = await fetchWithRetry(
+            '/api/analyze',
+            { method: 'POST', body: formData },
+            ctrl.signal
+          );
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || 'Analysis failed');
+          }
+          const groupAnalysis = (await response.json()) as OCRResult;
+          if (leadFile)
+            void setCachedOcr(leadFile.file, leadFile.languageHint, groupAnalysis);
+          setFiles(prev =>
+            prev.map(f => {
+              if (f.id === leadId) return { ...f, analysis: groupAnalysis };
+              if (wholeDocPlan.get(f.id)?.coveredBy === leadId)
+                return {
+                  ...f,
+                  analysis: coveredPageAnalysis(),
+                  pdfWholeCovered: true,
+                };
+              return f;
+            })
+          );
+          if (leadFile) saveResultsToDisk(leadFile.name, groupAnalysis);
+          setPipeline({ stage: 'complete', percent: 100, message: 'Done!' });
+          return;
+        }
+
         let analysis: OCRResult;
         if (isDocxFile(file)) {
           analysis = createTextAnalysis(await extractDocxText(file.file));
@@ -927,6 +1031,9 @@ export const useFiles = () => {
     let completed = 0;
     const total = imageFiles.length;
 
+    // Born-digital multi-page PDFs → one whole-document call (see runFullPipeline).
+    const wholeDocPlan = buildWholeDocPdfPlan(files);
+
     setPipeline({
       stage: 'analyzing',
       percent: 0,
@@ -943,6 +1050,19 @@ export const useFiles = () => {
       });
 
       try {
+        const planEntry = wholeDocPlan.get(files[index].id);
+        if (planEntry?.coveredBy) {
+          // Covered by this PDF's whole-document lead page — no API call.
+          setFiles(prev =>
+            prev.map((f, i) =>
+              i === index
+                ? { ...f, analysis: coveredPageAnalysis(), pdfWholeCovered: true }
+                : f
+            )
+          );
+          completed++;
+          continue;
+        }
         let analysis: OCRResult;
         if (isDocxFile(files[index])) {
           analysis = createTextAnalysis(
@@ -957,7 +1077,10 @@ export const useFiles = () => {
             analysis = cached;
           } else {
             const formData = new FormData();
-            if (files[index].pdfTextLayer) {
+            if (planEntry?.combinedText) {
+              // Lead page: send ALL pages' text in one call.
+              formData.append('pdfText', planEntry.combinedText);
+            } else if (files[index].pdfTextLayer) {
               formData.append('pdfText', files[index].pdfTextLayer!);
             } else {
               formData.append('file', files[index].file);
@@ -1063,78 +1186,72 @@ export const useFiles = () => {
     });
     setError('');
 
-    // Parse user intent once at pipeline start (non-blocking on failure)
-    const pipelineIntent = await parseIntentIfNeeded(ctrl.signal);
-
     // Phase 1: OCR / text-extract all analyzable files that haven't been analyzed
     const imageFiles = files
       .map((f, i) => ({ file: f, index: i }))
       .filter(({ file }) => canAnalyzeFile(file) && !file.analysis);
 
-    const totalSteps = imageFiles.length + 1; // +1 for report step (translation counted as it goes)
-    let completed = 0;
-
     // Track the latest file state for translation decisions
     let latestFiles = [...files];
 
-    for (const { index } of imageFiles) {
+    // Born-digital multi-page PDFs are analyzed in ONE whole-document call so
+    // fields from different sections (applicant vs. spouse vs. children) are
+    // attributed to the right person instead of conflated per page.
+    const wholeDocPlan = buildWholeDocPdfPlan(files);
+
+    let ocrCompleted = 0;
+    for (let batchStart = 0; batchStart < imageFiles.length; batchStart += PIPELINE_OCR_BATCH_SIZE) {
       ctrl.signal.throwIfAborted();
-      setIsAnalyzing(index);
+      const batch = imageFiles.slice(batchStart, batchStart + PIPELINE_OCR_BATCH_SIZE);
+
+      setIsAnalyzing(batch[0].index);
       setPipeline({
         stage: 'analyzing',
-        percent: Math.round((completed / (totalSteps + files.length)) * 100),
-        message: `Analyzing ${files[index].name}...`,
+        percent: imageFiles.length === 0 ? 50 : Math.round(5 + (ocrCompleted / imageFiles.length) * 45),
+        message: batch.length === 1
+          ? `Analyzing ${files[batch[0].index].name}...`
+          : `Analyzing ${batch.map(b => files[b.index].name).join(', ')}...`,
       });
 
+      let batchResults: Array<{ index: number; analysis: OCRResult; pdfWholeCovered: boolean; fromCache: boolean }>;
       try {
-        let analysis: OCRResult;
-        const cached = await getCachedOcr(
-          files[index].file,
-          files[index].languageHint
-        );
-        if (cached) {
-          analysis = cached;
-        } else {
-          const formData = new FormData();
-          if (files[index].pdfTextLayer) {
-            formData.append('pdfText', files[index].pdfTextLayer!);
-          } else {
-            formData.append('file', files[index].file);
-          }
-          if (files[index].languageHint) {
-            formData.append('languageHint', files[index].languageHint);
-          }
-
-          const response = await fetchWithRetry(
-            '/api/analyze',
-            { method: 'POST', body: formData },
-            ctrl.signal
-          );
-
-          if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(
-              data.error || `Analysis failed for ${files[index].name}`
+        batchResults = await Promise.all(
+          batch.map(async ({ index }) => {
+            ctrl.signal.throwIfAborted();
+            const planEntry = wholeDocPlan.get(files[index].id);
+            if (planEntry?.coveredBy) {
+              return { index, analysis: coveredPageAnalysis() as OCRResult, pdfWholeCovered: true, fromCache: true };
+            }
+            const cached = await getCachedOcr(files[index].file, files[index].languageHint);
+            if (cached) {
+              return { index, analysis: cached, pdfWholeCovered: false, fromCache: true };
+            }
+            const formData = new FormData();
+            if (planEntry?.combinedText) {
+              // Lead page: send ALL pages' text in one call.
+              formData.append('pdfText', planEntry.combinedText);
+            } else if (files[index].pdfTextLayer) {
+              formData.append('pdfText', files[index].pdfTextLayer!);
+            } else {
+              formData.append('file', files[index].file);
+            }
+            if (files[index].languageHint) {
+              formData.append('languageHint', files[index].languageHint);
+            }
+            const response = await fetchWithRetry(
+              '/api/analyze',
+              { method: 'POST', body: formData },
+              ctrl.signal
             );
-          }
-
-          analysis = await response.json();
-          void setCachedOcr(
-            files[index].file,
-            files[index].languageHint,
-            analysis
-          );
-        }
-        latestFiles = latestFiles.map((f, i) =>
-          i === index ? { ...f, analysis } : f
+            if (!response.ok) {
+              const data = await response.json().catch(() => ({}));
+              throw new Error(data.error || `Analysis failed for ${files[index].name}`);
+            }
+            const analysis = await response.json() as OCRResult;
+            void setCachedOcr(files[index].file, files[index].languageHint, analysis);
+            return { index, analysis, pdfWholeCovered: false, fromCache: false };
+          })
         );
-        setFiles(latestFiles as FileInfo[]);
-        saveResultsToDisk(files[index].name, analysis);
-        completed++;
-        // Cooldown between OCR requests (skipped on a cache hit — no API call made)
-        if (!cached && completed < imageFiles.length) {
-          await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
-        }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         if (err instanceof AbortedError) return;
@@ -1143,10 +1260,27 @@ export const useFiles = () => {
         setIsAnalyzing(null);
         return;
       }
+
+      for (const r of batchResults) {
+        const updates: Partial<FileInfo> = { analysis: r.analysis };
+        if (r.pdfWholeCovered) updates.pdfWholeCovered = true;
+        latestFiles = latestFiles.map((f, i) => i === r.index ? { ...f, ...updates } : f);
+        saveResultsToDisk(files[r.index].name, r.analysis);
+      }
+      setFiles(latestFiles as FileInfo[]);
+      ocrCompleted += batch.length;
+
+      // Rate-limit cooldown between batches (skipped when the whole batch was cache hits)
+      const anyUncached = batchResults.some(r => !r.fromCache);
+      if (anyUncached && batchStart + PIPELINE_OCR_BATCH_SIZE < imageFiles.length) {
+        await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
+      }
     }
     setIsAnalyzing(null);
 
-    // Phase 2: Translate all analyzed files with non-English content
+    // Phase 2: Translate all analyzed files with non-English content.
+    // All translation requests fire in parallel — translation calls are text-only
+    // and cheap enough that sequential rate-limit delays are not needed.
     const toTranslate = latestFiles
       .map((f, i) => ({ file: f, index: i }))
       .filter(
@@ -1158,94 +1292,58 @@ export const useFiles = () => {
           !file.translation
       );
 
-    setPipeline({
-      stage: 'translating',
-      percent: Math.round(
-        (completed / (totalSteps + toTranslate.length)) * 100
-      ),
-      message: toTranslate.length
-        ? `Translating ${toTranslate.length} document(s) requiring translation...`
-        : 'All documents already in English, skipping translation...',
-    });
-
-    for (const { index } of toTranslate) {
-      ctrl.signal.throwIfAborted();
-      setIsTranslating(index);
+    if (toTranslate.length > 0) {
       setPipeline({
         stage: 'translating',
-        percent: Math.round(
-          (completed / (totalSteps + toTranslate.length)) * 100
-        ),
-        message: `Translating ${latestFiles[index].name}...`,
+        percent: 50,
+        message: `Translating ${toTranslate.length} document(s)...`,
       });
 
+      let transResults: Array<{ index: number; translation: TranslationResult }>;
       try {
-        let translation: TranslationResult;
-        const cachedTr = await getCachedTranslation(
-          latestFiles[index].file,
-          'en',
-          latestFiles[index].languageHint
+        transResults = await Promise.all(
+          toTranslate.map(async ({ index }) => {
+            ctrl.signal.throwIfAborted();
+            setIsTranslating(index);
+            const cachedTr = await getCachedTranslation(
+              latestFiles[index].file,
+              'en',
+              latestFiles[index].languageHint
+            );
+            if (cachedTr) return { index, translation: cachedTr };
+            const formData = new FormData();
+            formData.append('targetLanguage', 'en');
+            if (latestFiles[index].languageHint) {
+              formData.append('languageHint', latestFiles[index].languageHint!);
+            }
+            if (latestFiles[index].analysis) {
+              // Text path – no file bytes needed.
+              formData.append('ocrText', (latestFiles[index].analysis as OCRResult).text || '');
+              formData.append(
+                'ocrFields',
+                JSON.stringify((latestFiles[index].analysis as OCRResult).structured_data?.fields || [])
+              );
+              formData.append(
+                'ocrLanguage',
+                (latestFiles[index].analysis as OCRResult).document_language || ''
+              );
+            } else {
+              formData.append('file', latestFiles[index].file);
+            }
+            const response = await fetchWithRetry(
+              '/api/translate',
+              { method: 'POST', body: formData },
+              ctrl.signal
+            );
+            if (!response.ok) {
+              const data = await response.json().catch(() => ({}));
+              throw new Error(data.error || `Translation failed for ${latestFiles[index].name}`);
+            }
+            const translation = await response.json() as TranslationResult;
+            void setCachedTranslation(latestFiles[index].file, 'en', latestFiles[index].languageHint, translation);
+            return { index, translation };
+          })
         );
-        if (cachedTr) {
-          translation = cachedTr;
-        } else {
-          const formData = new FormData();
-          formData.append('targetLanguage', 'en');
-          if (latestFiles[index].languageHint) {
-            formData.append('languageHint', latestFiles[index].languageHint!);
-          }
-          if (latestFiles[index].analysis) {
-            // Text path – no file bytes needed.
-            formData.append(
-              'ocrText',
-              (latestFiles[index].analysis as OCRResult).text || ''
-            );
-            formData.append(
-              'ocrFields',
-              JSON.stringify(
-                (latestFiles[index].analysis as OCRResult).structured_data
-                  ?.fields || []
-              )
-            );
-            formData.append(
-              'ocrLanguage',
-              (latestFiles[index].analysis as OCRResult).document_language || ''
-            );
-          } else {
-            formData.append('file', latestFiles[index].file);
-          }
-
-          const response = await fetchWithRetry(
-            '/api/translate',
-            { method: 'POST', body: formData },
-            ctrl.signal
-          );
-
-          if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(
-              data.error || `Translation failed for ${latestFiles[index].name}`
-            );
-          }
-
-          translation = await response.json();
-          void setCachedTranslation(
-            latestFiles[index].file,
-            'en',
-            latestFiles[index].languageHint,
-            translation
-          );
-        }
-        latestFiles = latestFiles.map((f, i) =>
-          i === index ? { ...f, translation } : f
-        );
-        setFiles(latestFiles as FileInfo[]);
-        saveResultsToDisk(latestFiles[index].name, undefined, translation);
-        completed++;
-        // Cooldown between requests (skipped on a cache hit — no API call made)
-        if (!cachedTr && completed < toTranslate.length) {
-          await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
-        }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         if (err instanceof AbortedError) return;
@@ -1254,6 +1352,12 @@ export const useFiles = () => {
         setIsTranslating(null);
         return;
       }
+
+      for (const { index, translation } of transResults) {
+        latestFiles = latestFiles.map((f, i) => i === index ? { ...f, translation } : f);
+        saveResultsToDisk(latestFiles[index].name, undefined, translation);
+      }
+      setFiles(latestFiles as FileInfo[]);
     }
     setIsTranslating(null);
 
@@ -1339,9 +1443,6 @@ export const useFiles = () => {
 
     // Phase 2.5: Auto-infer family relationships (family mode + 2+ members)
     // Use latestMembers so newly auto-inferred members from Phase 2 are included
-    let graphForReport: FamilyGraph | undefined = familyModeEnabled
-      ? { ...familyGraph, members: latestMembers }
-      : undefined;
     if (familyModeEnabled && latestMembers.length >= 2) {
       setPipeline({
         stage: 'analyzing',
@@ -1381,10 +1482,9 @@ export const useFiles = () => {
                 ],
               };
               setFamilyGraph(newGraph);
-              graphForReport = newGraph;
               setInferStatus({
                 type: 'success',
-                message: `Pipeline auto-inferred ${autoInferred.length} relationship(s). Review and promote any you agree with before re-generating the report.`,
+                message: `Pipeline auto-inferred ${autoInferred.length} relationship(s). Review and promote any you agree with before generating the report.`,
               });
             }
           }
@@ -1393,7 +1493,7 @@ export const useFiles = () => {
         if (inferErr instanceof DOMException && inferErr.name === 'AbortError')
           return;
         if (inferErr instanceof AbortedError) return;
-        // Non-fatal — continue to report generation even if inference fails
+        // Non-fatal — continue even if inference fails
         console.warn(
           '[Family] Pipeline relationship inference failed:',
           inferErr
@@ -1401,182 +1501,11 @@ export const useFiles = () => {
       }
     }
 
-    // Phase 3: Generate report
-    const pipelineGroups = buildGroupedDocuments(latestFiles);
-    if (pipelineGroups.length === 0) {
-      setError('No analyzed files available for report generation');
-      setPipeline({ stage: 'idle', percent: 0, message: '' });
-      return;
-    }
-
-    // Split into included vs excluded by illegibility confidence
-    const pipelineExcluded = pipelineGroups.filter(
-      g => getGroupIllegibilityConfidence(g) === 'low'
-    );
-    const pipelineIncluded = pipelineGroups.filter(
-      g => getGroupIllegibilityConfidence(g) !== 'low'
-    );
-    const pipelineExcludedDocs = pipelineExcluded.map(g => ({
-      name: g.name,
-      reason:
-        'Document illegibility confidence is too low — content could not be reliably read and may contain errors',
-    }));
-
-    if (pipelineIncluded.length === 0) {
-      setError(
-        'All documents are illegible and have been excluded from the report. Please provide clearer scans.'
-      );
-      setPipeline({ stage: 'idle', percent: 0, message: '' });
-      return;
-    }
-
-    setIsGeneratingReport(true);
     setPipeline({
-      stage: 'generating-report',
-      percent: 85,
-      message: 'Reading documents for report...',
+      stage: 'complete',
+      percent: 100,
+      message: 'Analysis complete! Review members and relationships, then generate the report.',
     });
-
-    try {
-      // ── Phase 1 (Map) — build compact summaries ───────────────────────────────
-      const pipelineReportMode = process.env.NEXT_PUBLIC_REPORT_MODE ?? 'light';
-      const pipelineSummaries: DocumentSummary[] = [];
-
-      if (pipelineReportMode === 'deep') {
-        let completed = 0;
-        const deepSummaries = await Promise.all(
-          pipelineIncluded.map(async g => {
-            const resp = await fetchWithRetry(
-              '/api/analyze-document-report',
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ group: g }),
-              },
-              ctrl.signal
-            );
-            if (!resp.ok) {
-              const data = await resp.json().catch(() => ({}));
-              throw new Error(
-                data.error || `Document analysis failed for ${g.name}`
-              );
-            }
-            const s = (await resp.json()) as DocumentSummary;
-            completed++;
-            setPipeline({
-              stage: 'generating-report',
-              percent:
-                Math.round((completed / pipelineIncluded.length) * 8) + 85,
-              message: `Read document ${completed}/${pipelineIncluded.length}: ${g.name}`,
-            });
-            return s;
-          })
-        );
-        pipelineSummaries.push(...deepSummaries);
-      } else {
-        for (const g of pipelineIncluded) {
-          pipelineSummaries.push(buildDocumentSummaryFromOCR(g));
-        }
-      }
-
-      // ── Phase 2.75: Classify field discrepancies (feeds into report) ──────────
-      let pipelineFieldFindings: ClassifiedFieldFinding[] | undefined;
-      if (pipelineIncluded.length >= 2) {
-        setPipeline({
-          stage: 'generating-report',
-          percent: 88,
-          message: 'Classifying field discrepancies...',
-        });
-        try {
-          const discResponse = await fetchWithRetry(
-            '/api/analyze-discrepancies',
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                documents: pipelineIncluded,
-                familyGraph: graphForReport,
-                parsedIntent: pipelineIntent ?? undefined,
-                perDocNotes: latestFiles
-                  .filter(f => f.userNotes)
-                  .map(f => ({ fileName: f.name, notes: f.userNotes! })),
-                // Per-document legibility ratings so the classifier de-escalates
-                // apparent conflicts sourced from poor/handwritten scans.
-                docLegibility: pipelineSummaries.map(s => ({
-                  name: s.documentName,
-                  legibility: s.legibility,
-                  isHandwritten: s.isHandwritten,
-                })),
-              }),
-            },
-            ctrl.signal
-          );
-          if (discResponse.ok) {
-            const discResult = await discResponse.json();
-            setDiscrepancyCheck({
-              hasDiscrepancies: discResult.hasDiscrepancies,
-              summary: discResult.summary,
-              isChecking: false,
-              fieldFindings: discResult.fieldFindings,
-            });
-            pipelineFieldFindings = discResult.fieldFindings;
-          }
-        } catch (discErr) {
-          if (discErr instanceof DOMException && discErr.name === 'AbortError')
-            return;
-          if (discErr instanceof AbortedError) return;
-          console.warn(
-            '[Pipeline] Discrepancy classification failed, continuing:',
-            discErr
-          );
-        }
-      }
-
-      // ── Phase 3 (Reduce) — synthesise full report ─────────────────────────────
-      setPipeline({
-        stage: 'generating-report',
-        percent: 92,
-        message: 'Generating comprehensive report...',
-      });
-
-      const response = await fetchWithRetry(
-        '/api/generate-report',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            summaries: pipelineSummaries,
-            excludedDocuments: pipelineExcludedDocs.length
-              ? pipelineExcludedDocs
-              : undefined,
-            familyGraph: graphForReport,
-            parsedIntent: pipelineIntent ?? undefined,
-            fieldFindings: pipelineFieldFindings,
-          }),
-        },
-        ctrl.signal
-      );
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Report generation failed');
-      }
-
-      const reportData: AnalysisReport = await response.json();
-      setReport(reportData);
-      setPipeline({
-        stage: 'complete',
-        percent: 100,
-        message: 'Pipeline complete!',
-      });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      if (err instanceof AbortedError) return;
-      setError(err instanceof Error ? err.message : 'Report generation failed');
-      setPipeline({ stage: 'idle', percent: 0, message: '' });
-    } finally {
-      setIsGeneratingReport(false);
-    }
   }, [
     files,
     buildGroupedDocuments,
@@ -1585,7 +1514,6 @@ export const useFiles = () => {
     saveResultsToDisk,
     familyModeEnabled,
     familyGraph,
-    parseIntentIfNeeded,
   ]);
 
   // ── Translation ───────────────────────────────────────────────────────
@@ -1919,8 +1847,8 @@ export const useFiles = () => {
       // ── Phase 1.5: Re-classify field discrepancies against the CURRENT graph ──
       // Member/relationship edits change classification, so we must NOT reuse the
       // cached findings here — they could contradict the up-to-date family
-      // cross-reference. Re-run the classifier (mirroring runFullPipeline's Phase 2.75)
-      // so the concordance and the family section are derived from the same graph.
+      // cross-reference. Re-run the classifier so the concordance and the family
+      // section are derived from the same graph.
       const graphForReport = familyModeEnabled ? familyGraph : undefined;
       let freshFieldFindings: ClassifiedFieldFinding[] | undefined =
         discrepancyCheck.fieldFindings;

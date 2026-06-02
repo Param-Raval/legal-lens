@@ -21,6 +21,16 @@ import type {
   UserRequestedCheck,
 } from '@/types';
 
+// ── Pipeline capacity limits ──────────────────────────────────────────────
+// Tune these to trade off coverage vs. cost/latency.
+const CROSS_MEMBER_MAX_CHECKS = 40;    // max planner tasks → checker calls (was 15)
+const CROSS_MEMBER_PLANNER_TEMP = 0;   // deterministic task selection (was 0.2)
+const CROSS_MEMBER_PLANNER_TOKENS = 3500; // output budget for planner (was 2000)
+const FIELD_ROW_CAP_BASE = 200;        // min field rows sent to Sub-A classifier (was 120)
+const FIELD_ROW_CAP_PER_DOC = 30;     // per-doc field row budget (was 20)
+const CONCORDANCE_COMBINED_CAP = 400;  // concordance rows in light-case combined prompt (was 200)
+const CONCORDANCE_SYNTHESIS_CAP = 400; // non-consistent concordance rows in heavy-case synthesis (was 240)
+
 // ── Canonical field name map ─────────────────────────────────────────────
 //
 // Maps normalized field-name variants → stable canonical key.
@@ -938,10 +948,21 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
       const timedOut =
         err instanceof Error &&
         (err.name === 'TimeoutError' || err.name === 'AbortError');
+      // Surface the true underlying cause (undici hides it behind a generic
+      // "fetch failed"); without this the operator only sees our wrapper.
+      const cause = (err as { cause?: unknown }).cause;
+      const detail =
+        err instanceof Error
+          ? `${err.name}: ${err.message}${cause instanceof Error ? ` (cause ${cause.name}: ${cause.message}${(cause as { code?: string }).code ? ` [${(cause as { code?: string }).code}]` : ''})` : ''}`
+          : String(err);
+      console.error(
+        `[openaiChat:${label}] attempt ${attempt} failed — ${detail}`
+      );
       lastError = new Error(
         timedOut
           ? 'OpenAI request timed out. Please try again.'
-          : 'Network error contacting OpenAI. Please try again.'
+          : 'Network error contacting OpenAI. Please try again.',
+        { cause: err }
       );
       if (attempt < MAX_RETRIES) {
         await sleep(backoffMs(attempt));
@@ -1164,72 +1185,290 @@ Return ONLY valid JSON, no additional text.`;
   });
 }
 
+// ── Token-budget constants for extractStructuredFromText ────────────────────
+//
+// Rule of thumb: ~3.5 chars per token for mixed English form text + prose.
+// GPT-4o context window: 128K tokens. High-recall zone: ≤ ~50K tokens input.
+//
+// TEXT_SINGLE_CALL_CHARS: below this, one whole-document call.
+//   I-589 at 25 pages ≈ 70K chars ≈ 20K tokens → always single-call.
+//   Threshold ≈ 34K tokens — firmly in the high-recall zone.
+const TEXT_SINGLE_CALL_CHARS = 120_000;
+//
+// TEXT_CHUNK_CHARS: when splitting, target this per chunk.
+//   Each chunk + header + prompt ≈ 25K tokens, well inside context.
+const TEXT_CHUNK_CHARS = 85_000;
+
 /**
- * Structure a born-digital PDF page from its EXACT extracted text layer instead
- * of vision-OCRing the rendered image. Returns the same OCRResult shape as
- * extractText() so the rest of the pipeline is unaffected. Faster, exact (no OCR
- * recognition errors), and skips the image tokens. Only used for pages where
- * /api/pdf-pages found a substantial text layer.
+ * Core extraction rules — shared between single-call and chunked prompts so the
+ * person-attribution logic is identical regardless of how the text is split.
+ */
+function _extractionRules(langNote: string): string {
+  return `You are given the EXACT text from a born-digital PDF's embedded text layer. Treat it as ground truth — it is NOT OCR output and contains no recognition errors. Analyze it and return ONLY the structured metadata below.
+
+IMPORTANT: Do NOT echo or reproduce the document text in your response — the caller already has the exact text and will attach it. Returning the full text wastes time and risks altering it. Return only the fields described below.
+${langNote}
+RULES:
+- Extract key-value pairs into structured_data.fields (e.g. Name, DOB, Document Number) and any tables.
+- Identify the document_type and the primary non-English language code (use 'en' only if the document is entirely English).
+- MULTIPLE PEOPLE IN ONE DOCUMENT: A form often describes several people in clearly labeled sections (e.g. an asylum/immigration application listing the applicant, their spouse, each child, parents, and siblings). Decide whose information each field is FROM ITS SECTION HEADING, and keep different people's data separate:
+  - Fields under a heading about the main applicant ("Information About You", "Applicant", "the person applying") stay UNPREFIXED. Use plain keys: "First Name", "Date of Birth", "Passport Number".
+  - Fields under a heading naming a RELATIVE (Spouse, Husband, Wife, Child, Son, Daughter, Parent, Father, Mother, Sibling, Brother, Sister) are ALWAYS that relative's, NOT the applicant's, EVEN IF the entire section/page is about that relative. Prefix every such field with the relative's role plus an index when there are several of the same role: "Spouse First Name", "Spouse Date of Birth", "Child 1 Last Name", "Child 2 Date of Birth", "Father Full Name", "Sibling 1 Full Name".
+  - Do NOT treat a relative as the primary subject just because a page is mostly about them — only the applicant is unprefixed.
+  - NEVER place two different people's values under the same key.
+  - If a section is blank, omit those fields.
+- Normally set illegibility.detected=false, confidence="high", handwritten=false, reason="".
+- Exception: garbled sections (Unicode replacement chars, encoding artifacts, nonsensical runs) → set detected=true, confidence="low" if majority garbled else "medium", describe in reason. Use "[UNABLE TO READ]" for unreadable field values.
+
+Return your response as JSON with this EXACT structure (NO "text" field):
+{
+    "document_type": "type of document",
+    "document_language": "primary non-English language code or 'en'",
+    "structured_data": { "fields": [{"key": "field name", "value": "field value"}] },
+    "tables": [{"headers": ["h1", "h2"], "rows": [["v1", "v2"]]}],
+    "illegibility": {"detected": false, "confidence": "high", "handwritten": false, "reason": ""}
+}`;
+}
+
+/**
+ * Run one structuring LLM call. contextHeader (non-empty for chunk 2+) is
+ * injected between the rules and the document text so the model knows which
+ * pages it is reading and who the primary applicant is — essential when a section
+ * that started on a previous chunk continues without repeating its heading.
+ */
+async function _runExtractionCall(
+  chunkText: string,
+  langNote: string,
+  contextHeader: string,
+  label: string
+): Promise<Record<string, unknown>> {
+  const headerBlock = contextHeader ? `\n${contextHeader}\n` : '';
+  const PROMPT = `${_extractionRules(langNote)}${headerBlock}
+
+## DOCUMENT TEXT:
+${chunkText}
+
+Return ONLY valid JSON, no additional text.`;
+
+  return getConfig().provider === 'openai'
+    ? await openaiChat({
+        messages: [{ role: 'user', content: PROMPT }],
+        temperature: 0.1,
+        maxTokens: 4000,
+        label,
+      })
+    : await ollamaGenerate({
+        model: getConfig().ollama.reasoningModel,
+        prompt: PROMPT,
+      });
+}
+
+/**
+ * Split combined `--- Page N ---`-delimited text at page boundaries.
+ * The page header is kept inside each segment so the model sees it and can use
+ * it to infer section context (e.g. "--- Page 8 ---" tells it it's mid-document).
+ */
+function _splitByPageBoundaries(
+  text: string
+): Array<{ pageNum: number; text: string }> {
+  const segments = text.split(/(?=--- Page \d+ ---)/).filter(s => s.trim());
+  if (segments.length === 0) return [{ pageNum: 1, text }];
+  return segments.map(seg => {
+    const m = seg.match(/^--- Page (\d+) ---/);
+    return { pageNum: m ? parseInt(m[1], 10) : 1, text: seg.trim() };
+  });
+}
+
+/**
+ * Group page segments into chunks fitting within TEXT_CHUNK_CHARS.
+ * A single oversized page is never split — it becomes its own chunk.
+ */
+function _groupPagesIntoChunks(
+  pages: Array<{ pageNum: number; text: string }>
+): Array<Array<{ pageNum: number; text: string }>> {
+  const chunks: Array<Array<{ pageNum: number; text: string }>> = [];
+  let cur: Array<{ pageNum: number; text: string }> = [];
+  let curLen = 0;
+  for (const page of pages) {
+    if (cur.length > 0 && curLen + page.text.length > TEXT_CHUNK_CHARS) {
+      chunks.push(cur);
+      cur = [];
+      curLen = 0;
+    }
+    cur.push(page);
+    curLen += page.text.length;
+  }
+  if (cur.length > 0) chunks.push(cur);
+  return chunks;
+}
+
+/**
+ * Build the document-context header injected into every chunk after the first.
+ *
+ * Without this, a model seeing only pages 11–20 of a 25-page form has no idea
+ * whether a field belongs to the applicant or a relative — the "Information About
+ * You" heading was on page 1. The header carries the applicant identity + page
+ * range so attribution rules work even for sections that continue from earlier chunks.
+ */
+function _buildDocContextHeader(
+  firstResult: Record<string, unknown>,
+  totalPages: number,
+  chunkPageNums: number[]
+): string {
+  type Field = { key: string; value: string };
+  const fields =
+    ((firstResult.structured_data as Record<string, unknown>)?.fields as Field[]) ?? [];
+
+  const IDENTITY_RE = /first name|last name|full name|middle name|date of birth|alien registration|applicant name/i;
+  const RELATIVE_RE = /spouse|child|sibling|father|mother|parent/i;
+  const identityParts = fields
+    .filter(f => IDENTITY_RE.test(f.key) && !RELATIVE_RE.test(f.key))
+    .slice(0, 6)
+    .map(f => `${f.key}: ${f.value}`);
+
+  const docType = (firstResult.document_type as string) || 'immigration form';
+  const first = chunkPageNums[0];
+  const last = chunkPageNums[chunkPageNums.length - 1];
+  const pageRange = first === last ? `page ${first}` : `pages ${first}–${last}`;
+
+  return `## DOCUMENT CONTEXT (established from earlier pages — for attribution only, do not re-extract):
+Document type: ${docType} | Total pages: ${totalPages}
+Primary applicant: ${identityParts.length ? identityParts.join(' | ') : '(see page 1)'}
+You are extracting ${pageRange} of ${totalPages}. Sections that started on earlier pages may continue here without repeating their heading — use the "--- Page N ---" markers and any visible sub-headings or question numbers to infer which section you are in.
+Person-attribution rules apply in full: ONLY the applicant's own fields ("Information About You") are UNPREFIXED. All relatives (Spouse, Child N, Father, Mother, Sibling N) are prefixed with their role even if an entire page focuses on them.
+Extract only NEW fields visible in this page range — do not repeat fields already captured from earlier pages.`;
+}
+
+/**
+ * Merge partial extraction results from multiple chunks.
+ *
+ * Field merge strategy:
+ * - Same key + same value  → deduplicate (boundary overlap of repeated labels).
+ * - Same key + diff value  → concatenate with space. Handles narrative/explanation
+ *   fields (e.g. Part B answers) that span a chunk boundary — continuation text is
+ *   preserved rather than silently dropped.
+ * - document_type / language → first non-empty result wins.
+ * - illegibility → worst-case union across all chunks.
+ */
+function _mergeExtractionResults(
+  results: Record<string, unknown>[]
+): Record<string, unknown> {
+  type Field = { key: string; value: string };
+  const fieldMap = new Map<string, string>();
+  const tables: unknown[] = [];
+  let docType = '';
+  let docLang = '';
+  let illDetected = false;
+  let worstConf = 'high';
+
+  for (const r of results) {
+    if (!docType && r.document_type) docType = r.document_type as string;
+    if (!docLang && r.document_language) docLang = r.document_language as string;
+
+    for (const f of ((r.structured_data as Record<string, unknown>)?.fields ?? []) as Field[]) {
+      if (!f.key || f.value === undefined) continue;
+      const existing = fieldMap.get(f.key);
+      if (existing === undefined || existing === '') {
+        fieldMap.set(f.key, f.value);
+      } else if (existing !== f.value) {
+        // Different value for same key: concatenate (narrative continuation).
+        fieldMap.set(f.key, `${existing} ${f.value}`.trim());
+      }
+      // Same value: skip (deduplicate).
+    }
+
+    tables.push(...((r.tables as unknown[]) ?? []));
+
+    const ill = r.illegibility as Record<string, unknown> | undefined;
+    if (ill?.detected) {
+      illDetected = true;
+      if (ill.confidence === 'low') worstConf = 'low';
+      else if (ill.confidence === 'medium' && worstConf !== 'low') worstConf = 'medium';
+    }
+  }
+
+  return {
+    document_type: docType,
+    document_language: docLang,
+    structured_data: {
+      fields: [...fieldMap.entries()].map(([key, value]) => ({ key, value })),
+    },
+    tables,
+    illegibility: { detected: illDetected, confidence: worstConf, handwritten: false, reason: '' },
+  };
+}
+
+/**
+ * Structure a born-digital PDF's text (single page or whole multi-page document)
+ * instead of vision-OCRing the rendered image. Returns the same OCRResult shape
+ * as extractText(). Faster, exact, zero image tokens.
+ *
+ * For multi-page PDFs the caller passes all-pages combined text (--- Page N ---
+ * delimited, built by buildWholeDocPdfPlan in useFiles.ts). This function decides:
+ *
+ *   <= 120K chars (~34K tokens): single call — best cross-section context.
+ *     I-589 at 25 pages ≈ 70K chars → always takes this path.
+ *
+ *   > 120K chars: chunk at page boundaries, inject a document-context header
+ *     (applicant identity + page range) into each later chunk so the model keeps
+ *     correct person attribution even without seeing the opening section. Results
+ *     are merged with continuation-aware field merging.
  */
 export async function extractStructuredFromText(
   documentText: string,
   languageHint?: string
-) {
+): Promise<Record<string, unknown>> {
   const langNote = languageHint
     ? `\nThe user indicates this document is in **${languageHint}**; prefer that for "document_language" unless it is clearly otherwise.\n`
     : '';
 
-  const PROMPT = `You are given the EXACT text from a born-digital PDF's embedded text layer. Treat it as ground truth — it is NOT OCR output and contains no recognition errors. Structure it into the JSON below.
-${langNote}
-RULES:
-- Copy the source text faithfully into "text", preserving line breaks. Do NOT paraphrase, translate, summarize, or invent content.
-- This is a digital text layer; normally set "illegibility.detected" to false, "confidence" to "high", "handwritten" to false, "reason" to "".
-- Exception: if the text contains clearly garbled sections (e.g. Unicode replacement characters like �, repeated encoding artifacts, or runs of obviously nonsensical characters), mark those portions as [UNABLE TO READ] in the "text" field and in any affected field values, set "illegibility.detected" to true, and describe the issue briefly in "reason". Set confidence to "low" if the majority of the text is garbled, "medium" if only isolated sections are affected.
-- Extract key-value pairs into structured_data.fields (e.g. Name, DOB, Document Number) and any tables.
-- Identify the document_type and the primary non-English language code (use 'en' only if the document is entirely English).
+  let rawResult: Record<string, unknown>;
 
-Return your response as JSON with this EXACT structure:
-{
-    "text": "all document text here, preserving line breaks",
-    "document_type": "type of document (e.g., passport, driver_license, birth_certificate, etc.)",
-    "document_language": "primary non-English language code (e.g., fa, ar, zh), or 'en' if entirely English",
-    "structured_data": {
-        "fields": [
-            {"key": "field name", "value": "field value"}
-        ]
-    },
-    "tables": [
-        {
-            "headers": ["header1", "header2"],
-            "rows": [["value1", "value2"]]
-        }
-    ],
-    "illegibility": {
-        "detected": false,
-        "confidence": "high",
-        "handwritten": false,
-        "reason": ""
+  if (documentText.length <= TEXT_SINGLE_CALL_CHARS) {
+    // Fast path: single whole-document call — best cross-section context retention.
+    rawResult = await _runExtractionCall(documentText, langNote, '', 'ocr-textlayer');
+  } else {
+    // Chunked path: splits at page boundaries, injects document-context header.
+    // Only fires for very large docs (> ~34K tokens). All common immigration forms
+    // (I-589 at 25 pages ≈ 20K tokens) always take the fast path above.
+    const pages = _splitByPageBoundaries(documentText);
+    const chunks = _groupPagesIntoChunks(pages);
+    const totalPages = pages.length > 0 ? pages[pages.length - 1].pageNum : 1;
+    console.log(
+      `[ocr-textlayer] doc ${documentText.length} chars exceeds single-call limit — ` +
+      `chunking into ${chunks.length} page-boundary groups.`
+    );
+
+    const results: Record<string, unknown>[] = [];
+    let docContextHeader = '';
+
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      const chunkText = chunk.map(p => p.text).join('\n\n');
+      const chunkPageNums = chunk.map(p => p.pageNum);
+      const result = await _runExtractionCall(
+        chunkText,
+        langNote,
+        docContextHeader,
+        `ocr-textlayer-chunk-${ci + 1}of${chunks.length}`
+      );
+      results.push(result);
+      // Build the context header from the first chunk so all subsequent chunks
+      // know the applicant identity + document type for correct attribution.
+      if (ci === 0) {
+        docContextHeader = _buildDocContextHeader(result, totalPages, chunkPageNums);
+      }
     }
-}
 
-## DOCUMENT TEXT:
-${documentText}
-
-Return ONLY valid JSON, no additional text.`;
-
-  if (getConfig().provider === 'openai') {
-    return await openaiChat({
-      messages: [{ role: 'user', content: PROMPT }],
-      temperature: 0.1,
-      maxTokens: 10000,
-      label: 'ocr-textlayer',
-    });
+    rawResult = _mergeExtractionResults(results);
   }
 
-  return await ollamaGenerate({
-    model: getConfig().ollama.reasoningModel,
-    prompt: PROMPT,
-  });
+  // The text layer is the source of truth — attach it verbatim.
+  // All downstream consumers (illegibility scan, summaries, translation) read .text.
+  if (rawResult && typeof rawResult === 'object') {
+    (rawResult as Record<string, unknown>).text = documentText;
+  }
+  return rawResult;
 }
 
 /**
@@ -1595,7 +1834,7 @@ export async function checkDiscrepancies(
   classificationFailed: boolean;
 }> {
   const fieldRows = extractFieldRows(groups);
-  const fieldRowCap = Math.max(120, groups.length * 20);
+  const fieldRowCap = Math.max(FIELD_ROW_CAP_BASE, groups.length * FIELD_ROW_CAP_PER_DOC);
 
   // User free-text (rawContext, notes) is JSON-encoded so it cannot break out
   // of its block and inject instructions that steer the discrepancy verdicts.
@@ -1671,6 +1910,8 @@ ${JSON.stringify(fieldRows.slice(0, fieldRowCap), null, 2)}
 ${intentBlock}${docNotesBlock}${familyRulesBlock}${qualityBlock}${legibilityBlock}
 ## TASK:
 Group fields by canonical name. For each canonical field appearing in 2+ documents, classify the comparison.
+
+PERSON-QUALIFIED FIELDS (critical — a single form may list several people): Some field keys name WHOSE datum they are — e.g. "Spouse First Name", "Spouse Date of Birth", "Child 1 Last Name", "Father Full Name". A person-qualified field belongs to that relative, NOT the applicant. Compare it ONLY with the identically-qualified field in other documents ("Spouse Date of Birth" with another "Spouse Date of Birth"). NEVER compare a qualified field against the unqualified applicant field or a differently-qualified one: the applicant's "Date of Birth" and a "Spouse Date of Birth" are TWO different people and are NOT a conflict. One document legitimately containing both the applicant's and relatives' data is normal — do not flag it.
 
 Status rules:
 - "consistent": values represent the SAME underlying fact. Judge meaning, not raw text.
@@ -2782,7 +3023,7 @@ ${JSON.stringify(documentNames, null, 2)}
 ${JSON.stringify(summaries, null, 2)}
 
 ## DETERMINISTIC CONCORDANCE CONTEXT:
-${JSON.stringify(concordanceRows.slice(0, 200), null, 2)}
+${JSON.stringify(concordanceRows.slice(0, CONCORDANCE_COMBINED_CAP), null, 2)}
 
 TASKS:
 1) Produce per-document discrepancies with ONE entry per document in the provided list, even if none were found.
@@ -2877,7 +3118,7 @@ ${JSON.stringify(documentNames, null, 2)}
 ${JSON.stringify(summaries, null, 2)}
 
 ## DETERMINISTIC CONCORDANCE CONTEXT (single-field value conflicts already captured in Section 2):
-${JSON.stringify(concordanceRows.filter(r => r.status !== 'consistent').slice(0, 240), null, 2)}
+${JSON.stringify(concordanceRows.filter(r => r.status !== 'consistent').slice(0, CONCORDANCE_SYNTHESIS_CAP), null, 2)}
 `;
     // ── Per-document prompt builder ──────────────────────────────────────
     // In family mode each call receives ONLY that member's documents — the
@@ -4186,7 +4427,7 @@ export async function runCrossMemberAnalysis(
   crossPersonFindings: CrossPersonDiscrepancy[];
   sharedFindings: SharedFieldComparison[];
 }> {
-  const MAX_CHECKER_CALLS = 15;
+  const MAX_CHECKER_CALLS = CROSS_MEMBER_MAX_CHECKS;
 
   if (members.length < 2)
     return { crossPersonFindings: [], sharedFindings: [] };
@@ -4358,8 +4599,8 @@ Return ONLY valid JSON:
     if (plannerConfig.provider === 'openai') {
       plannerRaw = await openaiChat({
         messages: [{ role: 'user', content: plannerPrompt }],
-        temperature: 0.2,
-        maxTokens: 2000,
+        temperature: CROSS_MEMBER_PLANNER_TEMP,
+        maxTokens: CROSS_MEMBER_PLANNER_TOKENS,
         label: 'cross-member:planner',
       });
     } else {

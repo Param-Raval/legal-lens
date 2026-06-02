@@ -139,6 +139,23 @@ if (existsSync(napirsDir)) {
   }
 }
 
+// 5a. Remove runtime/data directories that the file trace pulls in but that
+//     must never ship in the installer. The app's own output/ dir holds saved
+//     analysis results (real client data) and the trace bundles it because a
+//     server route references it; at runtime the app writes to OUTPUT_DIR under
+//     the user's Documents instead, so the bundled copy is unused. (We can't fix
+//     this via outputFileTracingExcludes: an 'output' pattern there is unanchored
+//     and also strips Next's own next/dist/build/output, breaking the server.)
+for (const dataDir of ['output']) {
+  const dirInStandalone = join(standaloneDir, dataDir);
+  if (existsSync(dirInStandalone)) {
+    withRetry(`rm bundled ${dataDir}/`, () =>
+      rmSync(dirInStandalone, { recursive: true, force: true }),
+    );
+    console.log(`Removed bundled ${dataDir}/ (runtime data — not for distribution)`);
+  }
+}
+
 // 5. Remove .env from standalone — Next.js copies the project .env which may
 //    contain real API keys. The Electron main process loads env vars from the
 //    user's AppData directory instead.

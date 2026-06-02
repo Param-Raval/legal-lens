@@ -402,7 +402,7 @@ export const FileViewer = ({
                             </Button>
                           </div>
                         </div>
-                        <div className="text-xs whitespace-pre-wrap bg-blue-50 p-2 rounded max-h-32 overflow-auto font-mono">
+                        <div className="text-xs whitespace-pre-wrap bg-muted/10 p-2 rounded max-h-32 overflow-auto font-mono">
                           {renderWithMarkers(file.translation.translated_text ?? '')}
                         </div>
                         {file.translation.notes && (
@@ -420,7 +420,7 @@ export const FileViewer = ({
                               (field, i) => (
                                 <div
                                   key={i}
-                                  className="flex justify-between text-xs p-1.5 bg-blue-50 rounded"
+                                  className="flex justify-between text-xs p-1.5 bg-muted/10 rounded"
                                 >
                                   <span className="font-medium text-muted-foreground">
                                     {field.key}
