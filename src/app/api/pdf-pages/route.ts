@@ -194,11 +194,13 @@ export async function POST(request: NextRequest) {
     // node_modules directories. Probe both locations and use an absolute file://
     // URL — ESM loads the file directly, no package resolution needed.
     // /* webpackIgnore: true */ prevents webpack re-externalizing back to bare specifier.
+    console.log(`[pdf-pages] DOMMatrix=${typeof globalThis.DOMMatrix} cwd=${process.cwd()}`);
     const _pdfjsMjsCandidates = [
       resolve(process.cwd(), 'node_modules/pdfjs-dist/legacy/build/pdf.mjs'),
       resolve(process.cwd(), 'server_modules/pdfjs-dist/legacy/build/pdf.mjs'),
     ];
     const _pdfjsMjsAbsolute = _pdfjsMjsCandidates.find(p => existsSync(p));
+    console.log(`[pdf-pages] pdfjs path=${_pdfjsMjsAbsolute ?? 'bare-specifier'}`);
     const pdfjsLib = _pdfjsMjsAbsolute
       ? await import(/* webpackIgnore: true */ pathToFileURL(_pdfjsMjsAbsolute).href as string)
       : await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -273,6 +275,10 @@ export async function POST(request: NextRequest) {
           err && typeof err === 'object' && 'name' in err
             ? (err as { name: string }).name
             : '';
+        const msg =
+          err instanceof Error ? err.message : String(err ?? 'unknown');
+        // Log the real error so it's visible in Vercel function logs.
+        console.error(`[pdf-pages] getDocument failed — ${name}: ${msg}`);
         if (name === 'PasswordException') {
           return NextResponse.json(
             {
