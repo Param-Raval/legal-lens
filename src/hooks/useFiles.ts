@@ -16,6 +16,7 @@ import {
   ParsedIntent,
 } from '@/types';
 import { extractPdfPages } from '@/lib/pdf-extract';
+import { downscaleImageForUpload } from '@/lib/image-downscale';
 import {
   MEMBER_COLOR_KEYS,
   canAnalyzeFile,
@@ -494,12 +495,17 @@ export const useFiles = () => {
             );
           }
         } else {
+          // Downscale oversized raster images BEFORE they enter state, so every
+          // downstream upload (analyze + translate) and the result-cache key use
+          // the smaller file. Raw phone photos / hi-res scans otherwise exceed
+          // Vercel's 4.5 MB serverless body limit and fail with an opaque 413.
+          const uploadFile = await downscaleImageForUpload(file);
           nonPdfs.push({
             id: `${file.name}-${file.lastModified}`,
             name: file.name,
-            size: file.size,
-            type: file.type,
-            file,
+            size: uploadFile.size,
+            type: uploadFile.type,
+            file: uploadFile,
             folderPath,
             familyMemberId: memberId,
           });

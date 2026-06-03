@@ -40,6 +40,7 @@ const SERVER_URL = `http://127.0.0.1:${PORT}`;
 
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: Electron.UtilityProcess | null = null;
+let logStream: fs.WriteStream | null = null;
 
 // ---------------------------------------------------------------------------
 // Single-instance lock — prevents the infinite-spawn cascade and ensures
@@ -96,8 +97,11 @@ function startServer(
   fs.mkdirSync(outputDir, { recursive: true });
 
   const logPath = path.join(app.getPath('userData'), 'server.log');
-  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`\n--- server start ${new Date().toISOString()} ---\n`);
+  // Use 'w' to truncate and start fresh each launch — avoids stale content
+  // from prior runs and prevents write failures on Windows when a previous
+  // stream was not cleanly closed (e.g. force-killed process).
+  logStream = fs.createWriteStream(logPath, { flags: 'w' });
+  logStream.write(`--- server start ${new Date().toISOString()} ---\n`);
 
   const child = utilityProcess.fork(serverScript, [], {
     env: {
@@ -117,20 +121,21 @@ function startServer(
   child.stdout?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     console.log(`[server] ${line}`);
-    logStream.write(`[out] ${line}\n`);
+    logStream?.write(`[out] ${line}\n`);
   });
 
   child.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     console.error(`[server] ${line}`);
-    logStream.write(`[err] ${line}\n`);
+    logStream?.write(`[err] ${line}\n`);
   });
 
   child.on('exit', (code) => {
     const line = `process exited with code ${code}`;
     console.log(`[server] ${line}`);
-    logStream.write(`[exit] ${line}\n`);
-    logStream.end();
+    logStream?.write(`[exit] ${line}\n`);
+    logStream?.end();
+    logStream = null;
     serverProcess = null;
   });
 
@@ -284,6 +289,14 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  // End the log stream before killing the server so buffered writes are
+  // flushed to disk. On Windows this is especially important — unflushed
+  // streams can leave the file in a state where the next launch's
+  // createWriteStream fails silently.
+  if (logStream) {
+    logStream.end();
+    logStream = null;
+  }
   if (serverProcess) {
     serverProcess.kill();
     serverProcess = null;

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { existsSync } from 'fs';
 import { resolve } from 'path';
+import { pathToFileURL } from 'url';
 import {
   enforceBodySize,
   safeErrorResponse,
@@ -151,17 +153,85 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Load pdfjs-dist legacy build (Node.js compatible) ───────────────
-    const workerPath = resolve(
-      process.cwd(),
-      'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'
-    );
+    // ── Load @napi-rs/canvas and register DOM geometry globals ────────────
+    // MUST happen before importing pdfjs-dist. pdfjs executes
+    // `const SCALE_MATRIX = new DOMMatrix()` at module evaluation time (line
+    // ~17006 of pdf.mjs) — not lazily inside getDocument/render. So DOMMatrix
+    // must be on globalThis before the import() call resolves.
+    // @napi-rs/canvas exports these classes but does NOT auto-register them.
+    const {
+      createCanvas,
+      DOMMatrix: _DOMMatrix,
+      DOMPoint: _DOMPoint,
+      DOMRect: _DOMRect,
+      ImageData: _ImageData,
+      Path2D: _Path2D,
+    } = await import('@napi-rs/canvas');
+    const _g = globalThis as Record<string, unknown>;
+    if (!_g.DOMMatrix) _g.DOMMatrix = _DOMMatrix;
+    if (!_g.DOMPoint) _g.DOMPoint = _DOMPoint;
+    if (!_g.DOMRect) _g.DOMRect = _DOMRect;
+    if (!_g.ImageData) _g.ImageData = _ImageData;
+    if (!_g.Path2D) _g.Path2D = _Path2D;
 
-    // Dynamically import to keep out of the client bundle
-    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      'file:///' + workerPath.replace(/\\/g, '/')
-    ).toString();
+    // ── Load pdfjs-dist legacy build (Node.js compatible) ───────────────
+    const _pdfjsWorkerCandidates = [
+      resolve(process.cwd(), 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'),
+      resolve(process.cwd(), 'server_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'),
+    ];
+    const _pdfjsWorkerAbsolute = _pdfjsWorkerCandidates.find(p => existsSync(p));
+
+    // ESM import() does NOT respect NODE_PATH (unlike CJS require). The Electron
+    // packaged app renames node_modules → server_modules; start.js sets
+    // NODE_PATH=server_modules which fixes CJS require('next') etc., but a bare
+    // specifier in an ESM import() fails because the ESM resolver only walks
+    // node_modules directories. Probe both locations and use an absolute file://
+    // URL — ESM loads the file directly, no package resolution needed.
+    // /* webpackIgnore: true */ prevents webpack re-externalizing back to bare specifier.
+    const _pdfjsMjsCandidates = [
+      resolve(process.cwd(), 'node_modules/pdfjs-dist/legacy/build/pdf.mjs'),
+      resolve(process.cwd(), 'server_modules/pdfjs-dist/legacy/build/pdf.mjs'),
+    ];
+    const _pdfjsMjsAbsolute = _pdfjsMjsCandidates.find(p => existsSync(p));
+    const pdfjsLib = _pdfjsMjsAbsolute
+      ? await import(/* webpackIgnore: true */ pathToFileURL(_pdfjsMjsAbsolute).href as string)
+      : await import('pdfjs-dist/legacy/build/pdf.mjs');
+    if (_pdfjsWorkerAbsolute) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        'file:///' + _pdfjsWorkerAbsolute.replace(/\\/g, '/')
+      ).toString();
+    }
+
+    // pdfjs detects Electron (process.versions.electron is set) and treats it as
+    // NOT Node.js, so `isNodeJS` is false and pdfjs falls back to DOMCanvasFactory
+    // which calls document.createElement('canvas') — crashing because there is no
+    // DOM. We override this by passing a CanvasFactory CLASS (capital C, not an
+    // instance) to getDocument — pdfjs calls `new CanvasFactory({ownerDocument})`
+    // so the constructor must accept and ignore those kwargs.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const _cc = createCanvas as (w: number, h: number) => any;
+    class NodeCanvasFactory {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      constructor(_opts?: any) {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      create(width: number, height: number): { canvas: any; context: any } {
+        const canvas = _cc(width, height);
+        return { canvas, context: canvas.getContext('2d') };
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      reset(canvasAndContext: any, width: number, height: number) {
+        canvasAndContext.canvas.width = width;
+        canvasAndContext.canvas.height = height;
+        canvasAndContext.context = canvasAndContext.canvas.getContext('2d');
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      destroy(canvasAndContext: any) {
+        canvasAndContext.canvas.width = 0;
+        canvasAndContext.canvas.height = 0;
+        canvasAndContext.canvas = null;
+        canvasAndContext.context = null;
+      }
+    }
 
     const buf = await file.arrayBuffer();
 
@@ -181,7 +251,17 @@ export async function POST(request: NextRequest) {
     try {
       let pdf;
       try {
-        pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+        pdf = await pdfjsLib
+          .getDocument({
+            data: new Uint8Array(buf),
+            // Packaged EXE can relocate node modules; fallback keeps parsing robust.
+            disableWorker: !_pdfjsWorkerAbsolute,
+            // CanvasFactory (capital C) is the CLASS constructor pdfjs instantiates
+            // with `new CanvasFactory({ownerDocument})`. This prevents pdfjs from
+            // falling back to DOMCanvasFactory (which calls document.createElement).
+            CanvasFactory: NodeCanvasFactory,
+          })
+          .promise;
       } catch (err: unknown) {
         const name =
           err && typeof err === 'object' && 'name' in err
@@ -206,9 +286,6 @@ export async function POST(request: NextRequest) {
       const totalPagesInPdf = pdf.numPages;
       const pagesToExtract = Math.min(totalPagesInPdf, maxPages);
 
-      // ── Load @napi-rs/canvas for server-side rendering ─────────────────
-      const { createCanvas } = await import('@napi-rs/canvas');
-
       const pages: Array<{
         pageNumber: number;
         jpeg: string; // base64-encoded JPEG
@@ -228,7 +305,8 @@ export async function POST(request: NextRequest) {
         try {
           const tc = await page.getTextContent();
           textLayer = tc.items
-            .map(it =>
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .map((it: any) =>
               'str' in it
                 ? it.str + ((it as { hasEOL?: boolean }).hasEOL ? '\n' : ' ')
                 : ''

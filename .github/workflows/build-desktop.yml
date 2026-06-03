@@ -40,6 +40,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify PDF runtime prerequisites
+        run: pnpm run verify:pdf-runtime
+
       - name: Build Next.js standalone
         run: npx cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build
 
