@@ -9,6 +9,19 @@ const nextConfig: NextConfig = {
   // server-side API routes (e.g. @napi-rs/canvas for PDF rendering).
   serverExternalPackages: ['@napi-rs/canvas', 'pdfjs-dist'],
 
+  // Force pdf.worker.mjs into the /api/pdf-pages serverless bundle.
+  // pdfjs-dist is a serverExternalPackage so its internals aren't statically
+  // analysed by the tracer. But on Vercel (where isNodeJS=true), pdfjs's static
+  // class initialiser sets GlobalWorkerOptions.workerSrc = "./pdf.worker.mjs"
+  // and fake-worker setup does import(workerSrc). Without this include, the
+  // worker file is absent from the function bundle and that import throws, making
+  // getDocument() reject and the route return 422 for every PDF.
+  outputFileTracingIncludes: {
+    '/api/pdf-pages': [
+      './node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',
+    ],
+  },
+
   // Exclude large non-code directories from the standalone file trace so
   // next build doesn't copy them into .next/standalone unnecessarily.
   outputFileTracingExcludes: {
