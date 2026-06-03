@@ -153,26 +153,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Load @napi-rs/canvas and register DOM geometry globals ────────────
-    // MUST happen before importing pdfjs-dist. pdfjs executes
-    // `const SCALE_MATRIX = new DOMMatrix()` at module evaluation time (line
-    // ~17006 of pdf.mjs) — not lazily inside getDocument/render. So DOMMatrix
-    // must be on globalThis before the import() call resolves.
-    // @napi-rs/canvas exports these classes but does NOT auto-register them.
-    const {
-      createCanvas,
-      DOMMatrix: _DOMMatrix,
-      DOMPoint: _DOMPoint,
-      DOMRect: _DOMRect,
-      ImageData: _ImageData,
-      Path2D: _Path2D,
-    } = await import('@napi-rs/canvas');
+    // ── Register DOM geometry globals BEFORE importing pdfjs ──────────────
+    // pdfjs executes `const SCALE_MATRIX = new DOMMatrix()` at module evaluation
+    // time — not lazily. DOMMatrix must be on globalThis before the import() call.
+    //
+    // Two-step to survive both Electron and Vercel:
+    //
+    // Step 1: pure-JS polyfill from @napi-rs/canvas/geometry.js.
+    //   geometry.js is a vendored polyfill with no native binary dependency. It IS
+    //   traced into the Vercel function bundle (visible in .nft.json). This gives
+    //   DOMMatrix/DOMPoint/DOMRect on any platform without the native addon.
+    //
+    // Step 2: native canvas (@napi-rs/canvas) for page rendering.
+    //   Needs a platform-specific .node binary. Available in Electron (bundled by
+    //   prepare-standalone.mjs) and on Vercel Linux (installed via `current` arch
+    //   in pnpm-workspace.yaml supportedArchitectures). If somehow unavailable, the
+    //   fallback from step 1 is still in place so pdfjs doesn't crash on load.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const _geom = require('@napi-rs/canvas/geometry.js') as Record<string, unknown>;
     const _g = globalThis as Record<string, unknown>;
-    if (!_g.DOMMatrix) _g.DOMMatrix = _DOMMatrix;
-    if (!_g.DOMPoint) _g.DOMPoint = _DOMPoint;
-    if (!_g.DOMRect) _g.DOMRect = _DOMRect;
-    if (!_g.ImageData) _g.ImageData = _ImageData;
-    if (!_g.Path2D) _g.Path2D = _Path2D;
+    if (!_g.DOMMatrix) _g.DOMMatrix = _geom.DOMMatrix;
+    if (!_g.DOMPoint) _g.DOMPoint = _geom.DOMPoint;
+    if (!_g.DOMRect) _g.DOMRect = _geom.DOMRect;
+
+    // Native canvas — needed for createCanvas (page rendering). Import after the
+    // globals are set so pdfjs can evaluate safely even if this import is slow.
+    const { createCanvas } = await import('@napi-rs/canvas');
 
     // ── Load pdfjs-dist legacy build (Node.js compatible) ───────────────
     const _pdfjsWorkerCandidates = [
