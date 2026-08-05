@@ -616,15 +616,19 @@ export const useFiles = () => {
    * When family mode is active, each group carries its family member assignment.
    */
   const buildGroupedDocuments = useCallback(
-    (fileList: FileInfo[]): DocumentGroup[] => {
+    (
+      fileList: FileInfo[],
+      membersOverride?: FamilyMember[]
+    ): DocumentGroup[] => {
       const groupMap = new Map<string, DocumentPage[]>();
       const groupNames = new Map<string, string>();
       const groupMemberIds = new Map<string, string | undefined>();
       const groupOrder: string[] = [];
 
-      // Build a quick id→member lookup
+      // Build a quick id→member lookup. membersOverride lets generateFreshReport
+      // pass members the pipeline just inferred, which aren't in state yet.
       const memberById = new Map<string, FamilyMember>(
-        familyGraph.members.map(m => [m.id, m])
+        (membersOverride ?? familyGraph.members).map(m => [m.id, m])
       );
 
       for (const f of fileList) {
@@ -1183,7 +1187,16 @@ export const useFiles = () => {
     [analysisContext, files, fetchWithRetry]
   );
 
-  const runFullPipeline = useCallback(async () => {
+  /**
+   * Runs OCR → translation → family inference over all files. Returns the
+   * freshest file list and family graph on success (React state updates are
+   * async, so callers chaining into report generation must use these instead
+   * of the `files`/`familyGraph` state), or null on abort/error.
+   */
+  const runFullPipeline = useCallback(async (): Promise<{
+    files: FileInfo[];
+    graph: FamilyGraph;
+  } | null> => {
     const ctrl = freshAbort();
     setPipeline({
       stage: 'analyzing',
@@ -1259,12 +1272,13 @@ export const useFiles = () => {
           })
         );
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        if (err instanceof AbortedError) return;
+        if (err instanceof DOMException && err.name === 'AbortError')
+          return null;
+        if (err instanceof AbortedError) return null;
         setError(err instanceof Error ? err.message : 'Analysis failed');
         setPipeline({ stage: 'idle', percent: 0, message: '' });
         setIsAnalyzing(null);
-        return;
+        return null;
       }
 
       for (const r of batchResults) {
@@ -1351,12 +1365,13 @@ export const useFiles = () => {
           })
         );
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        if (err instanceof AbortedError) return;
+        if (err instanceof DOMException && err.name === 'AbortError')
+          return null;
+        if (err instanceof AbortedError) return null;
         setError(err instanceof Error ? err.message : 'Translation failed');
         setPipeline({ stage: 'idle', percent: 0, message: '' });
         setIsTranslating(null);
-        return;
+        return null;
       }
 
       for (const { index, translation } of transResults) {
@@ -1370,6 +1385,7 @@ export const useFiles = () => {
     // Phase 2: Auto-infer family members (family mode, no members manually added)
     // Track freshest member list — React state updates are async so familyGraph may be stale below
     let latestMembers: FamilyMember[] = familyGraph.members;
+    let latestGraph: FamilyGraph = familyGraph;
     if (familyModeEnabled && familyGraph.members.length === 0) {
       setPipeline({
         stage: 'analyzing',
@@ -1397,6 +1413,7 @@ export const useFiles = () => {
                 relationships: [],
               };
               latestMembers = inferredMembers;
+              latestGraph = newGraph;
               setFamilyGraph(newGraph);
               setInferStatus({
                 type: 'success',
@@ -1440,8 +1457,8 @@ export const useFiles = () => {
           memberErr instanceof DOMException &&
           memberErr.name === 'AbortError'
         )
-          return;
-        if (memberErr instanceof AbortedError) return;
+          return null;
+        if (memberErr instanceof AbortedError) return null;
         // Non-fatal — continue even if member inference fails
         console.warn('[Family] Pipeline member inference failed:', memberErr);
       }
@@ -1487,6 +1504,7 @@ export const useFiles = () => {
                   ...autoInferred,
                 ],
               };
+              latestGraph = newGraph;
               setFamilyGraph(newGraph);
               setInferStatus({
                 type: 'success',
@@ -1497,8 +1515,8 @@ export const useFiles = () => {
         }
       } catch (inferErr) {
         if (inferErr instanceof DOMException && inferErr.name === 'AbortError')
-          return;
-        if (inferErr instanceof AbortedError) return;
+          return null;
+        if (inferErr instanceof AbortedError) return null;
         // Non-fatal — continue even if inference fails
         console.warn(
           '[Family] Pipeline relationship inference failed:',
@@ -1512,6 +1530,7 @@ export const useFiles = () => {
       percent: 100,
       message: 'Analysis complete! Review members and relationships, then generate the report.',
     });
+    return { files: latestFiles as FileInfo[], graph: latestGraph };
   }, [
     files,
     buildGroupedDocuments,
@@ -1720,6 +1739,17 @@ export const useFiles = () => {
             familyGraph: familyModeEnabled ? familyGraph : undefined,
             parsedIntent: intent ?? undefined,
             perDocNotes: perDocNotes.length ? perDocNotes : undefined,
+            // Same rating-based legibility guard the report path sends, so the
+            // standalone check also de-escalates conflicts sourced from poor
+            // scans / handwriting instead of calling them hard "inconsistent".
+            docLegibility: groups.map(g => {
+              const s = buildDocumentSummaryFromOCR(g);
+              return {
+                name: s.documentName,
+                legibility: s.legibility,
+                isHandwritten: s.isHandwritten,
+              };
+            }),
           }),
         },
         ctrl.signal
@@ -1762,8 +1792,14 @@ export const useFiles = () => {
 
   // ── Report Generation ─────────────────────────────────────────────────
 
-  const generateFullReport = useCallback(async () => {
-    const groups = buildGroupedDocuments(files);
+  const generateFullReport = useCallback(
+    async (filesOverride?: FileInfo[], graphOverride?: FamilyGraph) => {
+    // Overrides exist so generateFreshReport can pass the pipeline's freshest
+    // results directly — the `files`/`familyGraph` state in this closure is
+    // stale right after the pipeline finishes. Array.isArray guards against
+    // a click event arriving as the first arg when wired straight to onClick.
+    const fileList = Array.isArray(filesOverride) ? filesOverride : files;
+    const groups = buildGroupedDocuments(fileList, graphOverride?.members);
 
     if (groups.length === 0) {
       setError('No analyzed files available for report generation');
@@ -1855,9 +1891,14 @@ export const useFiles = () => {
       // cached findings here — they could contradict the up-to-date family
       // cross-reference. Re-run the classifier so the concordance and the family
       // section are derived from the same graph.
-      const graphForReport = familyModeEnabled ? familyGraph : undefined;
-      let freshFieldFindings: ClassifiedFieldFinding[] | undefined =
-        discrepancyCheck.fieldFindings;
+      const graphForReport = familyModeEnabled
+        ? (graphOverride ?? familyGraph)
+        : undefined;
+      // Starts undefined and is ONLY set from a successful re-classification
+      // below. Findings from a previous run must never leak in — they may
+      // reflect an older family graph or document set, and generateReport
+      // falls back to its own deterministic concordance when this is absent.
+      let freshFieldFindings: ClassifiedFieldFinding[] | undefined;
       if (includedGroups.length >= 2) {
         setPipeline({
           stage: 'generating-report',
@@ -1874,7 +1915,7 @@ export const useFiles = () => {
                 documents: includedGroups,
                 familyGraph: graphForReport,
                 parsedIntent: intent ?? undefined,
-                perDocNotes: files
+                perDocNotes: fileList
                   .filter(f => f.userNotes)
                   .map(f => ({ fileName: f.name, notes: f.userNotes! })),
                 docLegibility: summaries.map(s => ({
@@ -1960,8 +2001,20 @@ export const useFiles = () => {
     familyModeEnabled,
     familyGraph,
     parseIntentIfNeeded,
-    discrepancyCheck,
   ]);
+
+  /**
+   * "Fresh report": run the full pipeline first (OCR/translate any documents
+   * uploaded since the last run — already-processed files are cache hits and
+   * cost nothing), then regenerate the report from the pipeline's own fresh
+   * results. This guarantees newly uploaded documents are included, which
+   * plain "Generate Report" cannot do (it silently skips unanalyzed files).
+   */
+  const generateFreshReport = useCallback(async () => {
+    const result = await runFullPipeline();
+    if (!result) return; // pipeline aborted or failed — error already surfaced
+    await generateFullReport(result.files, result.graph);
+  }, [runFullPipeline, generateFullReport]);
 
   // ── Translation-Only Mode: Translate files without prior analysis ──────
 
@@ -2116,6 +2169,7 @@ export const useFiles = () => {
     translateAllWithoutAnalysis,
     checkDiscrepancies,
     generateFullReport,
+    generateFreshReport,
     stopProcessing,
     setClientName,
     setFileLanguage,

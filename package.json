@@ -1,6 +1,6 @@
 {
   "name": "brc-assistant",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "BRC Assistant — legal document analysis tool for border clinic caseworkers",
   "author": "Border Relief Clinic",
   "private": true,
@@ -32,6 +32,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "docx": "^9.6.1",
+    "driver.js": "^1.8.0",
     "jspdf": "^4.1.0",
     "jspdf-autotable": "^5.0.7",
     "jszip": "^3.10.1",

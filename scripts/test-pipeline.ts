@@ -27,6 +27,7 @@ import {
   checkDiscrepancies,
   generateReport,
 } from '../src/lib/ai-client.js';
+import { buildDocumentSummaryFromOCR } from '../src/lib/document-summary.js';
 import type { DocumentGroup, OCRResult, TranslationResult } from '../src/types/index.js';
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -197,7 +198,8 @@ async function main() {
 
   // ── Stage 4: Report generation ──────────────────────────────────────────
   log('REPORT', 'Generating full analysis report …');
-  const report = await generateReport(groups);
+  const summaries = groups.map(g => buildDocumentSummaryFromOCR(g));
+  const report = await generateReport(summaries);
   logJSON('Full Report', report);
 
   log('DONE', '✓ Pipeline completed successfully.');

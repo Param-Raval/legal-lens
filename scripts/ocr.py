@@ -133,6 +133,118 @@ Return your response as JSON with this EXACT structure:
 Return ONLY valid JSON, no additional text."""
 
 
+# Correction prompt: used when Azure DI draft text is available.
+# Azure DI detects handwritten fill-in values but has character-level errors in Persian.
+# GPT-4o corrects those errors using the image as visual reference.
+_CORRECTION_PROMPT_TEMPLATE = """\
+CONTEXT: You are correcting OCR errors in a scanned Persian civil document.
+
+The document is a FILLED-IN FORM. It has:
+- Pre-printed template text (field labels and fixed phrases)
+- Handwritten or typewritten values written into the blank spaces of the form
+
+A DRAFT OCR transcription is provided below. It was produced by an automated OCR engine \
+and has two types of problems:
+1. CHARACTER ERRORS — Persian proper nouns (names, cities, villages) are garbled due to \
+   similar-looking Arabic/Persian letter shapes being confused (e.g. و vs ا, ی vs ن, etc.)
+2. MISSING FILL-IN VALUES — some blank fields contain handwritten text that appears as \
+   ".........." in the draft but the actual text IS visible in the image
+
+YOUR TASK:
+1. Read the image carefully, paying special attention to handwritten or lightly-printed text \
+   in blank/dotted areas of the form
+2. Correct character-level OCR errors in Persian names, city names, village names, and numbers \
+   by using the visual content of the image
+3. Replace any ".........." occurrences with the ACTUAL TEXT visible in those blank field areas \
+   — do not leave any fill-in field blank if you can read it
+4. Preserve the overall prose/narrative structure as it appears in the document \
+   (Persian death certificates often embed all values in a single paragraph rather than \
+   using a key-value table)
+5. After producing the corrected full transcription, also list all key identity fields with \
+   their corrected values in structured_data.fields
+
+DRAFT OCR (correct this):
+{draft_text}
+
+Return ONLY valid JSON with this exact schema:
+{{
+    "text": "corrected full transcription — every fill-in value must be filled in",
+    "document_type": "document type",
+    "document_language": "language code e.g. fa",
+    "structured_data": {{
+        "fields": [
+            {{"key": "field label in original language", "value": "corrected value"}}
+        ]
+    }},
+    "tables": []
+}}
+"""
+
+
+def correct_ocr_with_draft(image_path: str, draft_text: str) -> "OCRResult":
+    """
+    Correct Azure DI OCR errors using GPT-4o Vision + the Azure DI draft as context.
+
+    Azure DI reliably detects handwritten regions but makes character-level Persian errors.
+    GPT-4o uses the image to verify and fix those errors, and also fills in any blank
+    fields that Azure DI left as "..........".
+
+    Args:
+        image_path: Path to the source image.
+        draft_text: Raw text from Azure Document Intelligence (may contain errors).
+
+    Returns:
+        Corrected OCRResult.
+    """
+    if not Path(image_path).exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    client = _get_client()
+    mime_type = _get_mime_type(image_path)
+    base64_image = _encode_image(image_path)
+    prompt = _CORRECTION_PROMPT_TEMPLATE.format(draft_text=draft_text)
+
+    max_retries = 1
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=GPT4O_DEPLOYMENT,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}},
+                    ],
+                }],
+                temperature=0.0,
+                max_tokens=10000,
+                response_format={"type": "json_object"},
+            )
+            choice = response.choices[0] if response.choices else None
+            if not choice or not choice.message or not choice.message.content:
+                finish = getattr(choice, "finish_reason", "unknown") if choice else "unknown"
+                if attempt < max_retries:
+                    print(f"  [RETRY] Empty correction response (finish_reason={finish}), retrying...")
+                    time.sleep(2 ** attempt)
+                    continue
+                raise Exception(f"Empty response from API (finish_reason={finish}).")
+            if choice.finish_reason == "length":
+                print("  [WARN] Correction response truncated, attempting JSON repair...")
+            try:
+                return json.loads(choice.message.content)
+            except json.JSONDecodeError:
+                return _repair_truncated_json(choice.message.content)
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_retries and "Empty response" not in str(exc):
+                print(f"  [RETRY] OCR correction attempt {attempt + 1} failed: {exc}")
+                time.sleep(2 ** attempt)
+                continue
+            raise Exception(f"OCR correction failed after {attempt + 1} attempt(s): {last_error}") from last_error
+
+
 def extract_text(image_path: str) -> OCRResult:
     """
     Extract text and structured data from a document image using GPT-4o Vision.

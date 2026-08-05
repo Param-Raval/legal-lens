@@ -873,13 +873,18 @@ function logTokenUsage(label: string, usage: unknown) {
   );
 }
 
-// Retry/backoff are deliberately bounded so that cumulative wait stays well
-// under the serverless function cap (Vercel Hobby = 60s) even across the 2-3
-// sequential model calls a single report request makes.
+// Retry/backoff are deliberately bounded so a single report request (2-3
+// sequential model calls) can't wait forever on transient failures.
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1500;
 const MAX_BACKOFF_MS = 8000;
-const PER_CALL_TIMEOUT_MS = 30_000;
+// Per-attempt cap for one NON-STREAMING completion — the fetch resolves only
+// after the full generation, so this must cover the largest configured output
+// (10K tokens at gpt-4o generation speed can exceed 60s). The old 30s value
+// was tuned for the deprecated Vercel 60s function wall; the Electron
+// deployment has no such wall, and 30s made large OCR/translation outputs
+// time out on every attempt (4x billed, then permanent failure).
+const PER_CALL_TIMEOUT_MS = 120_000;
 /** Output-token ceiling. gpt-4o supports up to 16384; operators on a
  *  4096-capped deployment should set GPT4O_MAX_OUTPUT_TOKENS=4096. */
 const outputTokenCap = () =>
@@ -1634,9 +1639,9 @@ ${ocrText}
 ## STRUCTURED FIELDS:
 ${JSON.stringify(ocrFields, null, 2)}
 
-Return your response as JSON with this structure:
+Return your response as JSON with this structure. Leave "original_text" as an empty string — do NOT copy the original text back (the caller already has it):
 {
-    "original_text": "the original text (copy from above)",
+    "original_text": "",
     "translated_text": "full translated text in ${langName}. Use [UNSURE - ILLEGIBLE SOURCE] for any sections that could not be confidently translated.",
     "original_language": "${srcLang}",
     "target_language": "${targetLanguage}",
@@ -1662,19 +1667,24 @@ Return your response as JSON with this structure:
 
 Return ONLY valid JSON, no additional text.`;
 
-  if (getConfig().provider === 'openai') {
-    return await openaiChat({
-      messages: [{ role: 'user', content: TRANSLATE_PROMPT }],
-      temperature: 0.1,
-      maxTokens: 8000,
-      label: 'translate-text',
-    });
-  }
+  const result =
+    getConfig().provider === 'openai'
+      ? await openaiChat({
+          messages: [{ role: 'user', content: TRANSLATE_PROMPT }],
+          temperature: 0.1,
+          maxTokens: 8000,
+          label: 'translate-text',
+        })
+      : await ollamaGenerate({
+          model: getConfig().ollama.reasoningModel,
+          prompt: TRANSLATE_PROMPT,
+        });
 
-  return await ollamaGenerate({
-    model: getConfig().ollama.reasoningModel,
-    prompt: TRANSLATE_PROMPT,
-  });
+  // Set the exact source text ourselves rather than having the model echo it
+  // back — the echo doubled the output size, which on long documents blew the
+  // token cap / per-call timeout and truncated the actual translation.
+  result.original_text = ocrText;
+  return result;
 }
 
 /**
@@ -1729,16 +1739,76 @@ Return ONLY this JSON (no explanation):
   }
 
   const parsed = result as Partial<ParsedIntent>;
+  // The model can return a bare string (or anything else) where a list is
+  // expected. The intent object is stored client-side and re-sent with every
+  // later analysis call, so an uncoerced value would make each of them 500
+  // (e.g. `.join is not a function`) until the user edits their context.
+  const strList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
   return {
-    fieldsToCompare: parsed.fieldsToCompare ?? [],
-    relationshipsToCheck: parsed.relationshipsToCheck ?? [],
-    specificInconsistencies: parsed.specificInconsistencies ?? [],
-    focusAreas: parsed.focusAreas ?? [],
+    fieldsToCompare: strList(parsed.fieldsToCompare),
+    relationshipsToCheck: strList(parsed.relationshipsToCheck),
+    specificInconsistencies: strList(parsed.specificInconsistencies),
+    focusAreas: strList(parsed.focusAreas),
     rawContext: globalContext,
-    interpretation: (parsed.interpretation ?? '').trim() || undefined,
+    interpretation:
+      typeof parsed.interpretation === 'string'
+        ? parsed.interpretation.trim() || undefined
+        : undefined,
     assumptions: Array.isArray(parsed.assumptions)
       ? parsed.assumptions.filter(a => typeof a === 'string' && a.trim())
       : undefined,
+  };
+}
+
+/**
+ * Coerce one raw classifier row into a valid ClassifiedFieldFinding, or null
+ * when it is unusable (no field name / unrecognisable status). Tolerates the
+ * frequent model slips — omitted note, lowercase severity, non-string values —
+ * instead of letting them fail the route's strict response schema.
+ */
+function sanitizeFieldFinding(raw: unknown): ClassifiedFieldFinding | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.field !== 'string' || !r.field.trim()) return null;
+  const status = typeof r.status === 'string' ? r.status.toLowerCase() : '';
+  if (
+    status !== 'consistent' &&
+    status !== 'inconsistent' &&
+    status !== 'missing_info' &&
+    status !== 'requires_review'
+  )
+    return null;
+  const asStr = (v: unknown): string =>
+    typeof v === 'string' ? v : v == null ? '' : String(v);
+  const sev =
+    typeof r.severity === 'string'
+      ? r.severity.charAt(0).toUpperCase() + r.severity.slice(1).toLowerCase()
+      : undefined;
+  return {
+    field: r.field,
+    canonicalName:
+      asStr(r.canonicalName) ||
+      r.field.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+    status,
+    note: typeof r.note === 'string' ? r.note : null,
+    documentsInvolved: Array.isArray(r.documentsInvolved)
+      ? r.documentsInvolved.map(asStr)
+      : [],
+    valuesByDocument: Array.isArray(r.valuesByDocument)
+      ? (r.valuesByDocument as unknown[]).flatMap(v => {
+          if (!v || typeof v !== 'object') return [];
+          const vv = v as Record<string, unknown>;
+          return [
+            {
+              document: asStr(vv.document),
+              original: asStr(vv.original),
+              translated: asStr(vv.translated),
+            },
+          ];
+        })
+      : [],
+    severity: sev === 'High' || sev === 'Medium' || sev === 'Low' ? sev : undefined,
   };
 }
 
@@ -1960,7 +2030,10 @@ Include only fields appearing in 2+ documents. Only set "severity" when status i
         ? await openaiChat({
             messages: [{ role: 'user', content: classifyPrompt }],
             temperature: 0.1,
-            maxTokens: 3000,
+            // Generous ceiling: a large field-row input can need thousands of
+            // output tokens; billing is on actual completion tokens, so a high
+            // cap costs nothing but prevents findings being truncated away.
+            maxTokens: 8000,
             label: 'discrepancy:classify',
           })
         : await ollamaGenerate({
@@ -1968,9 +2041,13 @@ Include only fields appearing in 2+ documents. Only set "severity" when status i
             prompt: classifyPrompt,
           });
     const rawFindings = (rawA as Record<string, unknown>).fieldFindings;
-    fieldFindings = Array.isArray(rawFindings)
-      ? (rawFindings as ClassifiedFieldFinding[])
-      : [];
+    // Coerce each finding to the exact ClassifiedFieldFinding shape and drop
+    // unusable rows. The route validates the response with a strict Zod
+    // schema, so one malformed model row (missing note, lowercase severity,
+    // non-string value) would otherwise 500 the whole already-paid call.
+    fieldFindings = (Array.isArray(rawFindings) ? rawFindings : [])
+      .map(sanitizeFieldFinding)
+      .filter((f): f is ClassifiedFieldFinding => f !== null);
   } catch (err) {
     console.warn('[checkDiscrepancies] Field classification failed:', err);
     classificationFailed = true;
@@ -2089,7 +2166,6 @@ Write a concise 2-4 sentence summary of the discrepancy situation for legal staf
 
 Return ONLY JSON:
 {
-  "hasDiscrepancies": ${hasDiscrepancies},
   "summary": "your summary here"
 }`;
 
@@ -2106,17 +2182,29 @@ Return ONLY JSON:
               model: getConfig().ollama.reasoningModel,
               prompt: summaryPrompt,
             });
-      hasDiscrepancies =
-        ((rawB as Record<string, unknown>).hasDiscrepancies as boolean) ??
-        hasDiscrepancies;
-      summary =
-        ((rawB as Record<string, unknown>).summary as string) ?? summary;
+      // Only the summary TEXT comes from the model. hasDiscrepancies stays
+      // the deterministic count computed above — a single model output must
+      // never be able to flip the top-line verdict against the evidence.
+      const rawSummary = (rawB as Record<string, unknown>).summary;
+      if (typeof rawSummary === 'string' && rawSummary.trim()) {
+        summary = rawSummary;
+      }
     } catch (err) {
       console.warn(
         '[checkDiscrepancies] Summary generation failed, using fallback:',
         err
       );
     }
+  }
+
+  // Coverage loss must be visible: rows beyond the classifier cap were never
+  // compared, and that must not read as "consistent by omission".
+  if (fieldRows.length > fieldRowCap) {
+    const skipped = fieldRows.length - fieldRowCap;
+    console.warn(
+      `[checkDiscrepancies] ${skipped} of ${fieldRows.length} field rows exceeded the comparison cap and were NOT compared`
+    );
+    summary += ` ⚠ ${skipped} of ${fieldRows.length} extracted field values exceeded the comparison capacity and were NOT compared — review those manually.`;
   }
 
   return { hasDiscrepancies, summary, fieldFindings, classificationFailed };
@@ -3243,9 +3331,7 @@ Return ONLY valid JSON: {"user_requested_checks":[{"checkId":"check-slug","reque
         if (mSummaries.length === 0) continue;
         const mDocNames = mSummaries.map(s => s.documentName);
         const mConcordance = concordanceRows.filter(r =>
-          'documents' in r
-            ? (r.documents as string[]).some(d => mDocNames.includes(d))
-            : mDocNames.includes((r as { document?: string }).document ?? '')
+          r.values_by_document.some(v => mDocNames.includes(v.document))
         );
         const mFieldFindings = fieldFindings?.filter(f =>
           f.documentsInvolved.some(d => mDocNames.includes(d))
@@ -3337,6 +3423,8 @@ Return ONLY valid JSON: {"user_requested_checks":[{"checkId":"check-slug","reque
             ): {
               crossPersonFindings: CrossPersonDiscrepancy[];
               sharedFindings: SharedFieldComparison[];
+              droppedChecks: number;
+              plannerFailed?: boolean;
             } => {
               console.warn(
                 '[generateReport] cross-member analysis failed:',
@@ -3345,12 +3433,18 @@ Return ONLY valid JSON: {"user_requested_checks":[{"checkId":"check-slug","reque
               analysisWarnings.push(
                 'The agentic cross-member consistency analysis did not complete; that section may be incomplete. Re-run or review manually.'
               );
-              return { crossPersonFindings: [], sharedFindings: [] };
+              return {
+                crossPersonFindings: [],
+                sharedFindings: [],
+                droppedChecks: 0,
+              };
             }
           )
         : Promise.resolve({
             crossPersonFindings: [] as CrossPersonDiscrepancy[],
             sharedFindings: [] as SharedFieldComparison[],
+            droppedChecks: 0,
+            plannerFailed: false as boolean | undefined,
           });
 
     const [parts, cmr] = await Promise.all([
@@ -3358,6 +3452,17 @@ Return ONLY valid JSON: {"user_requested_checks":[{"checkId":"check-slug","reque
       crossMemberPromise,
     ]);
     crossMemberResult = cmr;
+    // Partial cross-member coverage is a silent-degradation risk: surface it
+    // so the family section is never mistaken for a complete pass.
+    if (cmr.plannerFailed) {
+      analysisWarnings.push(
+        'The cross-member consistency planner did not complete — the family cross-reference section may be missing planned checks. Re-run or review manually.'
+      );
+    } else if (cmr.droppedChecks > 0) {
+      analysisWarnings.push(
+        `${cmr.droppedChecks} planned cross-member consistency check(s) did not complete and are missing from the family cross-reference section. Re-run or review manually.`
+      );
+    }
 
     // In family mode, multiple parts may each have a per_document_discrepancies array —
     // flatten and deduplicate them before merging into discrepancyRaw.
@@ -4426,11 +4531,15 @@ export async function runCrossMemberAnalysis(
 ): Promise<{
   crossPersonFindings: CrossPersonDiscrepancy[];
   sharedFindings: SharedFieldComparison[];
+  /** Planned checks that did not complete (checker error or invalid output). */
+  droppedChecks: number;
+  /** True when the planner itself failed — no checks could be planned at all. */
+  plannerFailed?: boolean;
 }> {
   const MAX_CHECKER_CALLS = CROSS_MEMBER_MAX_CHECKS;
 
   if (members.length < 2)
-    return { crossPersonFindings: [], sharedFindings: [] };
+    return { crossPersonFindings: [], sharedFindings: [], droppedChecks: 0 };
 
   // ── Build compact field map (one entry per member) ──────────────────
   const memberMap = members.map(m => {
@@ -4636,11 +4745,16 @@ Return ONLY valid JSON:
     }
   } catch (err) {
     console.warn('[runCrossMemberAnalysis] planner call failed:', err);
-    return { crossPersonFindings: [], sharedFindings: [] };
+    return {
+      crossPersonFindings: [],
+      sharedFindings: [],
+      droppedChecks: 0,
+      plannerFailed: true,
+    };
   }
 
   if (tasks.length === 0)
-    return { crossPersonFindings: [], sharedFindings: [] };
+    return { crossPersonFindings: [], sharedFindings: [], droppedChecks: 0 };
 
   // ── Step 2: Parallel checker calls ──────────────────────────────────
   interface CheckerResult {
@@ -4713,9 +4827,17 @@ Only return "inconsistent" when the values genuinely conflict and cannot be reco
     }
   );
 
-  const checkerResults = (await Promise.all(checkerCalls)).filter(
-    (r): r is CheckerResult => r !== null
-  );
+  const settled = await Promise.all(checkerCalls);
+  const checkerResults = settled.filter((r): r is CheckerResult => r !== null);
+  // Checkers that errored or returned an invalid verdict resolve to null —
+  // count them so the report can surface the coverage gap instead of the
+  // family section silently reading as complete.
+  const droppedChecks = settled.length - checkerResults.length;
+  if (droppedChecks > 0) {
+    console.warn(
+      `[runCrossMemberAnalysis] ${droppedChecks} of ${settled.length} planned checks did not complete`
+    );
+  }
 
   // ── Step 3: Map results to report types ─────────────────────────────
   const crossPersonFindings: CrossPersonDiscrepancy[] = [];
@@ -4758,7 +4880,7 @@ Only return "inconsistent" when the values genuinely conflict and cannot be reco
     }
   }
 
-  return { crossPersonFindings, sharedFindings };
+  return { crossPersonFindings, sharedFindings, droppedChecks };
 }
 
 /**

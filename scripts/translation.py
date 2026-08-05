@@ -18,6 +18,8 @@ LANGUAGE_NAMES = {
     'en': 'English',
     'fr': 'French',
     'ar': 'Arabic',
+    'fa_AF': 'Dari',
+    'fa': 'Farsi',
     'zh': 'Chinese',
     'es': 'Spanish',
     'pt': 'Portuguese',
@@ -25,6 +27,12 @@ LANGUAGE_NAMES = {
     'ja': 'Japanese',
     'ko': 'Korean',
     'hi': 'Hindi',
+    'bn': 'Bengali',
+    'ne': 'Nepali',
+    'ru': 'Russian',
+    'ur': 'Urdu',
+    'tr': 'Turkish',
+    'ta': 'Tamil',
     'ht': 'Haitian Creole',
 }
 
@@ -155,6 +163,172 @@ Return your response as JSON with this structure:
 }}
 
 Return ONLY valid JSON, no additional text."""
+
+
+def _safe_json_object_response(text: str) -> dict:
+    """Parse JSON object with repair fallback for truncated model output."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _repair_truncated_json(text)
+
+
+def _postprocess_line_alignment(source_lines: list[str], translated_lines: list[str]) -> list[str]:
+    """Keep output deterministic: one translated line per source line."""
+    if len(translated_lines) == len(source_lines):
+        return translated_lines
+    fixed = translated_lines[: len(source_lines)]
+    if len(fixed) < len(source_lines):
+        fixed.extend(source_lines[len(fixed):])
+    return fixed
+
+
+def translate_lines_strict(
+    lines: list[str],
+    source_language: str,
+    target_language: str = 'en',
+    language_hint: str | None = None,
+) -> dict:
+    """
+    Translate OCR lines with strict anti-hallucination constraints.
+
+    Returns:
+      {
+        "source_language": str,
+        "target_language": str,
+        "translated_lines": list[str]
+      }
+    """
+    if not lines:
+        return {
+            'source_language': language_hint or source_language,
+            'target_language': target_language,
+            'translated_lines': [],
+        }
+
+    src_lang = language_hint or source_language or 'unknown'
+    src_name = LANGUAGE_NAMES.get(src_lang, src_lang)
+    tgt_name = LANGUAGE_NAMES.get(target_language, target_language)
+
+    prompt = f"""You are a professional legal-document translator.
+Translate each input line from {src_name} ({src_lang}) to {tgt_name} ({target_language}).
+
+CRITICAL RULES:
+1. Output must contain exactly the same number of lines as input.
+2. Preserve order exactly.
+3. Do NOT add information not present in source.
+4. Keep numbers, IDs, dates, document numbers, stamps, and codes unchanged unless translation is obvious and lossless.
+5. If text is unclear/illegible, copy the original line unchanged.
+6. Keep proper names transliterated, not invented.
+7. No summaries, no explanations.
+
+Return JSON only:
+{{
+  "translated_lines": ["..."],
+  "notes": "optional short note"
+}}
+
+Input lines:
+{json.dumps(lines, ensure_ascii=False)}
+"""
+
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=GPT4O_DEPLOYMENT,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        max_tokens=8000,
+        response_format={"type": "json_object"},
+    )
+
+    content = (response.choices[0].message.content or '{}').strip()
+    payload = _safe_json_object_response(content)
+    translated_lines = payload.get('translated_lines', [])
+    translated_lines = _postprocess_line_alignment(lines, translated_lines)
+
+    return {
+        'source_language': src_lang,
+        'target_language': target_language,
+        'translated_lines': translated_lines,
+        'notes': payload.get('notes', ''),
+    }
+
+
+def translate_text_strict(
+    ocr_text: str,
+    ocr_fields: list[dict],
+    source_language: str,
+    target_language: str = 'en',
+    language_hint: str | None = None,
+) -> TranslationResult:
+    """
+    App-aligned text translation path (like src/lib/ai-client.ts translateText)
+    with stronger anti-hallucination constraints.
+    """
+    src_lang = language_hint or source_language or 'unknown'
+    src_name = LANGUAGE_NAMES.get(src_lang, src_lang)
+    tgt_name = LANGUAGE_NAMES.get(target_language, target_language)
+
+    prompt = f"""You are a professional translator for immigration/legal documents.
+Translate the following OCR text from {src_name} ({src_lang}) to {tgt_name} ({target_language}).
+
+STRICT CONSTRAINTS:
+1. Do not invent or infer missing content.
+2. Preserve numbers, identifiers, dates, and proper nouns unless direct translation/transliteration is clear.
+3. If a segment is illegible, keep it unchanged.
+4. Keep document structure and line breaks as much as possible.
+
+## ORIGINAL TEXT
+{ocr_text}
+
+## STRUCTURED FIELDS
+{json.dumps(ocr_fields, ensure_ascii=False)}
+
+Return JSON only with this exact schema:
+{{
+  "original_text": "...",
+  "translated_text": "...",
+  "original_language": "{src_lang}",
+  "target_language": "{target_language}",
+  "image_text": {{"original": "", "translated": ""}},
+  "structured_data": {{
+    "original_fields": [{{"key": "...", "value": "..."}}],
+    "translated_fields": [{{"key": "...", "value": "..."}}]
+  }},
+  "layout_preserved": true,
+  "notes": "brief quality note"
+}}
+"""
+
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=GPT4O_DEPLOYMENT,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        max_tokens=9000,
+        response_format={"type": "json_object"},
+    )
+
+    content = (response.choices[0].message.content or '{}').strip()
+    payload = _safe_json_object_response(content)
+
+    # Defensive defaults for schema compatibility.
+    return {
+        'original_text': payload.get('original_text', ocr_text),
+        'translated_text': payload.get('translated_text', ''),
+        'original_language': payload.get('original_language', src_lang),
+        'target_language': payload.get('target_language', target_language),
+        'image_text': payload.get('image_text', {'original': '', 'translated': ''}),
+        'structured_data': payload.get(
+            'structured_data',
+            {
+                'original_fields': ocr_fields or [],
+                'translated_fields': [],
+            },
+        ),
+        'layout_preserved': bool(payload.get('layout_preserved', True)),
+        'notes': payload.get('notes', ''),
+    }
 
 
 def translate_document(image_path: str, target_language: str = 'en') -> TranslationResult:

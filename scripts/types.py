@@ -3,7 +3,7 @@ Type definitions for document analysis.
 Uses TypedDict for JSON-compatible structures that match the TypeScript app.
 """
 
-from typing import TypedDict, List, Optional, Any
+from typing import TypedDict, List, Optional, Any, Literal, TypeAlias
 
 
 # OCR Result Types (matches src/types/index.ts AnalysisResponse)
@@ -151,3 +151,62 @@ class AnalysisReport(TypedDict):
     translation_notes: TranslationNotes
     action_items: List[ActionItem]
     report_metadata: ReportMetadata
+
+
+InputType: TypeAlias = Literal["text_pdf", "scanned_pdf", "image"]
+
+
+class BoundingBox(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class TextBlock(TypedDict):
+    page_number: int
+    text: str
+    bbox: BoundingBox
+    confidence: float
+    block_type: str
+
+
+class ExtractedTable(TypedDict):
+    page_number: int
+    headers: List[str]
+    rows: List[List[str]]
+
+
+class PageExtraction(TypedDict):
+    page_number: int
+    width: float
+    height: float
+    unit: str
+    image_path: str
+    full_text: str
+    blocks: List[TextBlock]
+
+
+class ExtractionResult(TypedDict):
+    input_type: InputType
+    source_path: str
+    source_name: str
+    pages: List[PageExtraction]
+    tables: List[ExtractedTable]
+    structured_fields: List[StructuredField]
+    detected_language: str
+
+
+class TranslatedPage(TypedDict):
+    page_number: int
+    translated_text: str
+    translated_blocks: List[str]
+
+
+class TranslationOutput(TypedDict):
+    source_name: str
+    original_language: str
+    target_language: str
+    pages: List[TranslatedPage]
+    translated_fields: List[StructuredField]
+    notes: str

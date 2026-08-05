@@ -36,7 +36,10 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  deleteAppDataOnUninstall: true
+  # NEVER true: %APPDATA%\BRC Assistant holds the .env with real API keys AND
+  # the Chromium profile (IndexedDB result cache / local case data). A routine
+  # uninstall-reinstall troubleshooting step must not destroy them.
+  deleteAppDataOnUninstall: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
 

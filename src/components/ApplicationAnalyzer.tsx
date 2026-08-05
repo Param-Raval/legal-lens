@@ -16,10 +16,12 @@ import {
   Play,
   Square,
   Info,
+  RefreshCw,
 } from 'lucide-react';
 import { DiscrepancyCheck, AnalysisReport, FileInfo, FamilyMember, FamilyGraph, FamilyRelationship } from '@/types';
 import type { PipelineProgress } from '@/hooks/useFiles';
 import { FamilyMemberPanel } from '@/components/FamilyMemberPanel';
+import { canAnalyzeFile } from '@/lib/utils';
 import {
   exportAllOcrAsText,
   exportAllOcrAsDocx,
@@ -65,6 +67,7 @@ interface ApplicationAnalyzerProps {
   onTranslateAllWithoutAnalysis: () => void;
   onCheckDiscrepancies: () => void;
   onGenerateReport: () => void;
+  onGenerateFreshReport: () => void;
   onStopProcessing: () => void;
   onViewReport: () => void;
   familyMode?: FamilyModeProps;
@@ -86,6 +89,7 @@ export const ApplicationAnalyzer = ({
   onTranslateAllWithoutAnalysis,
   onCheckDiscrepancies,
   onGenerateReport,
+  onGenerateFreshReport,
   onStopProcessing,
   onViewReport,
   familyMode,
@@ -131,6 +135,12 @@ export const ApplicationAnalyzer = ({
   const illegibleCount = files.filter(
     f => f.analysis?.illegibility?.detected
   ).length;
+  /** Documents uploaded after the last analysis run — not yet OCR'd, so a
+   *  plain "Generate Report" would silently leave them out. Same filter the
+   *  pipeline uses to pick files to analyze. */
+  const unanalyzedCount = files.filter(
+    f => canAnalyzeFile(f) && !f.analysis
+  ).length;
 
   const canAnalyze =
     imageFiles.length > analyzedCount &&
@@ -157,7 +167,7 @@ export const ApplicationAnalyzer = ({
 
   return (
     <>
-      {familyPanel}
+      {familyPanel && <div data-tour="family-panel">{familyPanel}</div>}
       <Card>
       <CardHeader>
         <CardTitle className="text-lg flex items-center space-x-2">
@@ -268,6 +278,7 @@ export const ApplicationAnalyzer = ({
                 (pipeline.stage !== 'idle' && pipeline.stage !== 'complete')
               }
               size="sm"
+              data-tour="analyze-all"
             >
               {pipeline.stage !== 'idle' && pipeline.stage !== 'complete' ? (
                 <>
@@ -286,6 +297,7 @@ export const ApplicationAnalyzer = ({
               onClick={onGenerateReport}
               disabled={!canGenerateReport}
               size="sm"
+              data-tour="generate-report"
             >
               {isGeneratingReport ? (
                 <>
@@ -305,6 +317,18 @@ export const ApplicationAnalyzer = ({
               )}
             </Button>
 
+            {unanalyzedCount > 0 && analyzedCount > 0 && (
+              <Button
+                onClick={onGenerateFreshReport}
+                disabled={isBusy}
+                size="sm"
+                data-tour="fresh-report"
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Fresh Report (+{unanalyzedCount} new)
+              </Button>
+            )}
+
             {report && (
               <Button onClick={onViewReport} variant="secondary" size="sm">
                 <Download className="h-4 w-4 mr-2" />
@@ -313,6 +337,20 @@ export const ApplicationAnalyzer = ({
             )}
 
           </div>
+
+          {unanalyzedCount > 0 && analyzedCount > 0 && (
+            <div className="flex items-start gap-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2">
+              <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>
+                <strong>{unanalyzedCount}</strong> newly added document
+                {unanalyzedCount > 1 ? 's have' : ' has'} not been analyzed yet
+                and would be left out of a report generated now. Click{' '}
+                <strong>Fresh Report</strong> to analyze the new upload
+                {unanalyzedCount > 1 ? 's' : ''} and rebuild the report with
+                every document included.
+              </span>
+            </div>
+          )}
 
           <div className="h-px bg-border" />
 

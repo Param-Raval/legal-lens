@@ -21,6 +21,34 @@ function envFilePath(): string {
   return path.join(dir, '.env');
 }
 
+/** Placeholder values seeded from .env.example must read as "not configured". */
+const PLACEHOLDER_RE = /your-.+-here/i;
+
+/**
+ * Reject requests that did not come from the app itself. The server binds to
+ * loopback, but a page in the user's regular browser can still reach it:
+ * cross-site via a no-preflight text/plain form POST (CSRF), or same-origin
+ * via DNS rebinding (Host = attacker domain resolving to 127.0.0.1). The
+ * hostname check defeats rebinding; the custom header — which a cross-origin
+ * page cannot send without a CORS preflight that would fail — defeats CSRF on
+ * the state-changing POST. Returns a 403 response, or null to proceed.
+ */
+function foreignRequestGuard(
+  req: NextRequest,
+  requireAppHeader: boolean
+): NextResponse | null {
+  const hostname = (req.headers.get('host') ?? '')
+    .replace(/:\d+$/, '')
+    .toLowerCase();
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+  if (requireAppHeader && req.headers.get('x-brc-app') !== '1') {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+  return null;
+}
+
 /** Minimal .env parser (same logic as Electron main). */
 function parseEnvFile(filePath: string): Record<string, string> {
   if (!fs.existsSync(filePath)) return {};
@@ -54,28 +82,42 @@ function serialiseEnv(entries: Record<string, string>): string {
     const val = entries[key] ?? '';
     lines.push(`${key}=${val}`);
   }
+  // Keys outside the allowlist (e.g. GPT4O_MAX_OUTPUT_TOKENS set directly in
+  // the file by an operator) must survive a Settings save, not be deleted.
+  const allowed = new Set<string>(ALLOWED_KEYS);
+  const extraKeys = Object.keys(entries).filter(k => !allowed.has(k));
+  if (extraKeys.length > 0) {
+    lines.push('', '# Other keys (preserved from the existing file)');
+    for (const key of extraKeys) {
+      lines.push(`${key}=${entries[key]}`);
+    }
+  }
   return lines.join('\n') + '\n';
 }
 
 // ── GET: return current settings (mask the API key) ────────────────────
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   if (process.env.VERCEL) {
     return NextResponse.json(
       { error: 'Settings API is disabled on Vercel.' },
       { status: 403 },
     );
   }
+  const forbidden = foreignRequestGuard(req, false);
+  if (forbidden) return forbidden;
 
   const env = parseEnvFile(envFilePath());
 
   // Build response — never reveal any characters of a secret key (a fixed
-  // placeholder + the `configured` map below is all the UI needs).
+  // placeholder + the `configured` map below is all the UI needs). A seeded
+  // placeholder key must show as NOT set, or first-run users see masked dots
+  // for a key that doesn't work.
   const settings: Record<string, string> = {};
   for (const key of ALLOWED_KEYS) {
     const val = env[key] ?? process.env[key] ?? '';
     if (key.endsWith('_KEY')) {
-      settings[key] = val ? '••••••••' : '';
+      settings[key] = val && !PLACEHOLDER_RE.test(val) ? '••••••••' : '';
     } else {
       settings[key] = val;
     }
@@ -84,7 +126,8 @@ export async function GET() {
   // Also send the raw (unmasked) key presence so the UI knows if it's set.
   const configured: Record<string, boolean> = {};
   for (const key of ALLOWED_KEYS) {
-    configured[key] = !!(env[key] ?? process.env[key]);
+    const val = env[key] ?? process.env[key] ?? '';
+    configured[key] = !!val && !(key.endsWith('_KEY') && PLACEHOLDER_RE.test(val));
   }
 
   return NextResponse.json({ settings, configured });
@@ -99,6 +142,8 @@ export async function POST(req: NextRequest) {
       { status: 403 },
     );
   }
+  const forbidden = foreignRequestGuard(req, true);
+  if (forbidden) return forbidden;
 
   let body: Record<string, string>;
   try {

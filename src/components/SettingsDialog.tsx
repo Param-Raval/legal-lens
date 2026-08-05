@@ -80,7 +80,9 @@ export function SettingsDialog() {
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // x-brc-app marks the request as coming from the app itself — the
+        // settings route rejects state-changing requests without it (CSRF guard).
+        headers: { 'Content-Type': 'application/json', 'x-brc-app': '1' },
         body: JSON.stringify(form),
       });
       if (!res.ok) throw new Error('Failed to save');

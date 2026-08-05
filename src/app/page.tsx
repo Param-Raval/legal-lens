@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FileText, Moon, Sun, StickyNote } from 'lucide-react';
+import { FileText, HelpCircle, Moon, Sun, StickyNote } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useFiles } from '@/hooks/useFiles';
+import { startTour, maybeAutoStartTour } from '@/lib/tour';
 import {
   FileUpload,
   FileSummary,
@@ -37,6 +38,7 @@ export default function Home() {
     translateAllWithoutAnalysis,
     checkDiscrepancies,
     generateFullReport,
+    generateFreshReport,
     stopProcessing,
     setClientName,
     setFileLanguage,
@@ -81,6 +83,11 @@ export default function Home() {
     }
   }, []);
 
+  // First launch after install: walk the user through the UI once.
+  useEffect(() => {
+    maybeAutoStartTour();
+  }, []);
+
   const toggleDarkMode = () => {
     setDarkMode(prev => {
       const next = !prev;
@@ -108,13 +115,25 @@ export default function Home() {
             </div>
             <h1 className="text-4xl font-bold tracking-tight">BRC Assistant</h1>
             <div className="absolute right-0 top-0 flex items-center gap-1">
-              <SettingsDialog />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => startTour()}
+                className="h-9 w-9 p-0"
+                title="Show guided tour"
+              >
+                <HelpCircle className="h-4 w-4" />
+              </Button>
+              <div data-tour="settings">
+                <SettingsDialog />
+              </div>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={toggleDarkMode}
                 className="h-9 w-9 p-0"
                 title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                data-tour="theme-toggle"
               >
                 {darkMode ? (
                   <Sun className="h-4 w-4" />
@@ -132,7 +151,10 @@ export default function Home() {
 
         {/* Client Name Input */}
         {files.length > 0 && (
-          <div className="flex items-center justify-center space-x-3">
+          <div
+            className="flex items-center justify-center space-x-3"
+            data-tour="client-name"
+          >
             <label
               htmlFor="clientName"
               className="text-sm font-medium text-muted-foreground"
@@ -151,7 +173,9 @@ export default function Home() {
         )}
 
         {/* File Upload */}
-        <FileUpload onUpload={uploadFiles} isLoading={isPdfExtracting} />
+        <div data-tour="upload">
+          <FileUpload onUpload={uploadFiles} isLoading={isPdfExtracting} />
+        </div>
 
         {/* Error Display */}
         <ErrorDisplay error={error} onClear={clearError} />
@@ -159,7 +183,10 @@ export default function Home() {
         {/* File Summary */}
         <FileSummary files={files} />
 
-        {/* File List */}
+        {/* File List (wrapper is a tour anchor; keep it out of the DOM when
+            FileList renders nothing so it can't affect layout) */}
+        {files.length > 0 && (
+        <div data-tour="file-list">
         <FileList
           files={files}
           isAnalyzing={isAnalyzing}
@@ -174,10 +201,12 @@ export default function Home() {
           onAssignMember={assignDocumentToMember}
           onUpdateFileNotes={updateFileNotes}
         />
+        </div>
+        )}
 
         {/* Analysis Context */}
         {files.length > 0 && (
-          <div className="space-y-2">
+          <div className="space-y-2" data-tour="analysis-context">
             <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <StickyNote className="h-4 w-4" />
               <span>Analysis context <span className="font-normal">(optional)</span></span>
@@ -209,6 +238,7 @@ export default function Home() {
           onTranslateAllWithoutAnalysis={translateAllWithoutAnalysis}
           onCheckDiscrepancies={checkDiscrepancies}
           onGenerateReport={generateFullReport}
+          onGenerateFreshReport={generateFreshReport}
           onStopProcessing={stopProcessing}
           onViewReport={() => setShowReport(true)}
           familyMode={{

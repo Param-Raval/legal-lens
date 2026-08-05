@@ -1,4 +1,11 @@
-import { app, BrowserWindow, dialog, shell, utilityProcess } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  shell,
+  utilityProcess,
+} from 'electron';
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
@@ -41,6 +48,9 @@ const SERVER_URL = `http://127.0.0.1:${PORT}`;
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: Electron.UtilityProcess | null = null;
 let logStream: fs.WriteStream | null = null;
+// Set while the app is quitting so the post-boot server-crash dialog does not
+// fire when before-quit intentionally kills the server.
+let isQuitting = false;
 
 // ---------------------------------------------------------------------------
 // Single-instance lock — prevents the infinite-spawn cascade and ensures
@@ -153,19 +163,33 @@ function waitForServer(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
+    let sawForeignResponder = false;
 
     const poll = () => {
       if (Date.now() > deadline) {
-        return reject(new Error('Server did not start in time'));
+        return reject(
+          new Error(
+            sawForeignResponder
+              ? `Another application is already using the app's port (${url}). Close it and relaunch BRC Assistant.`
+              : 'Server did not start in time',
+          ),
+        );
       }
 
       const req = http.get(url, (res) => {
         res.resume();
         if (res.statusCode && res.statusCode < 500) {
-          resolve();
-        } else {
-          setTimeout(poll, intervalMs);
+          // Confirm the responder is OUR Next.js server and not some other
+          // local app that happens to hold the same fixed port — otherwise
+          // the window would render a stranger's localhost page. The app's
+          // next.config sets X-Frame-Options: DENY on every route.
+          const ours =
+            res.headers['x-frame-options'] === 'DENY' ||
+            String(res.headers['x-powered-by'] ?? '').includes('Next.js');
+          if (ours) return resolve();
+          sawForeignResponder = true;
         }
+        setTimeout(poll, intervalMs);
       });
 
       req.on('error', () => {
@@ -197,6 +221,24 @@ function createWindow(url: string) {
     },
   });
 
+  // The window must only ever display the local app. A link inside AI- or
+  // document-derived content must open in the system browser, never replace
+  // the app page or spawn a child window running remote content.
+  mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (target.startsWith('http://') || target.startsWith('https://')) {
+      shell.openExternal(target);
+    }
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, target) => {
+    if (!target.startsWith(url)) {
+      event.preventDefault();
+      if (target.startsWith('http://') || target.startsWith('https://')) {
+        shell.openExternal(target);
+      }
+    }
+  });
+
   mainWindow.loadURL(url);
 
   mainWindow.on('closed', () => {
@@ -209,6 +251,13 @@ function createWindow(url: string) {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  // Drop the stock Electron menu (View → DevTools, Ctrl+R force-reload, …) —
+  // staff reloading mid-analysis loses in-flight work. Kept on macOS, where
+  // the menu supplies the clipboard shortcuts.
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+  }
+
   const extraEnv = loadEnv();
 
   if (isDev) {
@@ -237,7 +286,10 @@ app.whenReady().then(async () => {
     });
 
     try {
-      await Promise.race([waitForServer(SERVER_URL), earlyExit]);
+      // 90s (not the 30s default): the very first launch after an install can
+      // be slowed heavily by Windows Defender scanning the freshly written
+      // server_modules tree — failing fast there just looks broken.
+      await Promise.race([waitForServer(SERVER_URL, 90_000), earlyExit]);
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'The server failed to start.';
@@ -250,10 +302,31 @@ app.whenReady().then(async () => {
       return;
     }
 
-    // If .env has no API key, prompt the user.
+    // After a successful boot, a later server crash (OOM on a huge PDF, a
+    // native-module fault) would otherwise leave the window open with every
+    // request failing and no explanation.
+    serverProcess?.on('exit', (code) => {
+      if (isQuitting) return;
+      const choice = dialog.showMessageBoxSync({
+        type: 'error',
+        title: 'Server stopped',
+        message: `The analysis server stopped unexpectedly (code ${code ?? 'unknown'}).`,
+        detail: 'Restart BRC Assistant to continue working.',
+        buttons: ['Restart', 'Quit'],
+        defaultId: 0,
+      });
+      if (choice === 0) app.relaunch();
+      app.quit();
+    });
+
+    // If .env has no usable API key, prompt the user. Values seeded from
+    // .env.example (e.g. "your-azure-openai-api-key-here") are placeholders,
+    // not configuration — older installs still carry them uncommented.
     const envPath = path.join(app.getPath('userData'), '.env');
+    const keyIsPlaceholder =
+      !extraEnv.GPT4O_API_KEY || /your-.+-here/i.test(extraEnv.GPT4O_API_KEY);
     if (
-      !extraEnv.GPT4O_API_KEY &&
+      keyIsPlaceholder &&
       !extraEnv.OLLAMA_BASE_URL &&
       fs.existsSync(envPath)
     ) {
@@ -289,6 +362,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   // End the log stream before killing the server so buffered writes are
   // flushed to disk. On Windows this is especially important — unflushed
   // streams can leave the file in a state where the next launch's
