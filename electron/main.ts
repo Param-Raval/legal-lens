@@ -122,6 +122,11 @@ function startServer(
       NODE_ENV: 'production',
       OUTPUT_DIR: outputDir,
       CONFIG_DIR: app.getPath('userData'),
+      // Marks this server as the installed desktop app rather than a shared web
+      // deployment. Read by src/lib/report-mode.ts to default report mode to
+      // "deep" here (richer per-document read) while the web build stays
+      // "light". An explicit REPORT_MODE in the user's .env still wins.
+      BRC_DESKTOP: '1',
     },
     cwd: standaloneDir,
     stdio: 'pipe',

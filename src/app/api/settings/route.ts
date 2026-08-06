@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { resolveReportMode } from '@/lib/report-mode';
 
 /** Keys the UI is allowed to read/write. */
 const ALLOWED_KEYS = [
@@ -11,8 +12,22 @@ const ALLOWED_KEYS = [
   'OLLAMA_BASE_URL',
   'OLLAMA_MODEL',
   'OLLAMA_REASONING_MODEL',
-  'NEXT_PUBLIC_REPORT_MODE',
+  'REPORT_MODE',
 ] as const;
+
+/**
+ * Report mode used to be stored as NEXT_PUBLIC_REPORT_MODE, which Next.js bakes
+ * into the client bundle at build time — so the saved value never took effect.
+ * The setting is now plain REPORT_MODE, read server-side. Existing .env files
+ * still carry the old key, so migrate it instead of stranding the user's choice.
+ */
+const LEGACY_REPORT_MODE_KEY = 'NEXT_PUBLIC_REPORT_MODE';
+
+function migrateLegacyKeys(entries: Record<string, string>): void {
+  const legacy = entries[LEGACY_REPORT_MODE_KEY];
+  if (legacy && !entries.REPORT_MODE) entries.REPORT_MODE = legacy;
+  delete entries[LEGACY_REPORT_MODE_KEY];
+}
 
 /** Resolve the .env file path — CONFIG_DIR is set by Electron, otherwise
  *  fall back to the project root (dev mode). */
@@ -108,6 +123,7 @@ export async function GET(req: NextRequest) {
   if (forbidden) return forbidden;
 
   const env = parseEnvFile(envFilePath());
+  migrateLegacyKeys(env);
 
   // Build response — never reveal any characters of a secret key (a fixed
   // placeholder + the `configured` map below is all the UI needs). A seeded
@@ -122,6 +138,11 @@ export async function GET(req: NextRequest) {
       settings[key] = val;
     }
   }
+
+  // Report mode always has an effective value even when unset (it depends on
+  // whether this is the desktop app or a web deployment), so report what the
+  // pipeline will actually do rather than an empty dropdown.
+  if (!settings.REPORT_MODE) settings.REPORT_MODE = resolveReportMode();
 
   // Also send the raw (unmasked) key presence so the UI knows if it's set.
   const configured: Record<string, boolean> = {};
@@ -154,6 +175,9 @@ export async function POST(req: NextRequest) {
 
   // Read existing file first so we don't lose non-allowed keys/comments.
   const existing = parseEnvFile(envFilePath());
+  // Fold the old NEXT_PUBLIC_REPORT_MODE into REPORT_MODE and drop it, so the
+  // saved file has exactly one report-mode key.
+  migrateLegacyKeys(existing);
 
   // Merge incoming values (only allowed keys), validating before persisting so
   // a malformed URL can't repoint server-side requests (SSRF) or break config.
@@ -169,6 +193,10 @@ export async function POST(req: NextRequest) {
       errors.push('AI_PROVIDER must be "openai" or "ollama".');
       continue;
     }
+    if (key === 'REPORT_MODE' && val && !['light', 'deep'].includes(val.toLowerCase())) {
+      errors.push('REPORT_MODE must be "light" or "deep".');
+      continue;
+    }
     if (URL_KEYS.has(key) && val) {
       try {
         const u = new URL(val);
@@ -178,7 +206,8 @@ export async function POST(req: NextRequest) {
         continue;
       }
     }
-    existing[key] = key === 'AI_PROVIDER' ? val.toLowerCase() : val;
+    existing[key] =
+      key === 'AI_PROVIDER' || key === 'REPORT_MODE' ? val.toLowerCase() : val;
   }
 
   if (errors.length) {
@@ -190,12 +219,17 @@ export async function POST(req: NextRequest) {
   fs.mkdirSync(path.dirname(envPath), { recursive: true });
   fs.writeFileSync(envPath, serialiseEnv(existing), 'utf-8');
 
-  // Apply to the running process so the next API call uses new values.
+  // Apply to the running process so the next API call uses new values — this is
+  // what lets a Settings change (including report mode) take effect without
+  // restarting the app.
   for (const key of ALLOWED_KEYS) {
     if (existing[key] !== undefined) {
       process.env[key] = existing[key];
     }
   }
+  // Drop the migrated legacy key from the live environment too, so it cannot
+  // linger and confuse a later read.
+  delete process.env[LEGACY_REPORT_MODE_KEY];
 
   return NextResponse.json({ ok: true });
 }

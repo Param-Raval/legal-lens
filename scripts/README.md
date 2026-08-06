@@ -36,6 +36,32 @@ GPT4O_DEPLOYMENT=gpt-4o
 
 ## Usage
 
+### Azure Demo (Document Intelligence + Strict GPT-4o Translation)
+
+Run the standalone Azure validation script first:
+
+```bash
+python -m scripts.demo_azure_translation \
+  --png-path "C:/Users/Admin/Documents/Border Clinic Project/legal-lens/sample_docs/Afghan/Afghan Tazkera.png" \
+  --pdf-path "C:/Users/Admin/Documents/Border Clinic Project/legal-lens/sample_docs/Afghan/Afghan Tazkera.pdf" \
+  --target-language en
+```
+
+Required env vars:
+
+```env
+AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=...
+AZURE_DOCUMENT_INTELLIGENCE_KEY=...
+GPT4O_ENDPOINT=...
+GPT4O_API_KEY=...
+GPT4O_DEPLOYMENT=...
+```
+
+The script generates:
+- `translated_image_overlay.png`
+- `translated_pdf.pdf`
+- `side_by_side.pdf`
+
 ### Run Full Pipeline
 
 ```bash

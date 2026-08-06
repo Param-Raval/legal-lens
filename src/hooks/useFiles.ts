@@ -24,6 +24,7 @@ import {
   isDocxFile,
 } from '@/lib/utils';
 import { buildDocumentSummaryFromOCR } from '@/lib/document-summary';
+import { fetchReportMode } from '@/lib/report-mode-client';
 import {
   getCachedOcr,
   setCachedOcr,
@@ -1839,7 +1840,10 @@ export const useFiles = () => {
       const intent = await parseIntentIfNeeded(ctrl.signal);
 
       // ── Phase 1: Map — build compact DocumentSummary per included group ──────
-      const reportMode = process.env.NEXT_PUBLIC_REPORT_MODE ?? 'light';
+      // Asked of the server, not read from process.env: NEXT_PUBLIC_* values are
+      // baked into the client bundle at build time, which froze the packaged app
+      // on "light" forever. See src/lib/report-mode.ts.
+      const reportMode = await fetchReportMode(ctrl.signal);
       const summaries: DocumentSummary[] = [];
 
       if (reportMode === 'deep') {

@@ -9,13 +9,14 @@ nodeLinker: hoisted
 # pnpm 10+ blocks dependency install/build scripts unless approved here.
 # electron downloads its prebuilt binary in postinstall; the native modules
 # build/link their addons. core-js's postinstall is only a funding notice.
+# Every entry below must be a boolean — pnpm ignores a non-boolean value, which
+# silently leaves that package's build script blocked.
 allowBuilds:
   core-js: false
   electron: true
   electron-winstaller: true
   esbuild: true
   sharp: true
-  tesseract.js: set this to true or false
   unrs-resolver: true
 
 # Install native optional binaries (e.g. @napi-rs/canvas) for every OS/arch we

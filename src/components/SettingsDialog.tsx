@@ -23,7 +23,7 @@ interface FormState {
   GPT4O_DEPLOYMENT: string;
   OLLAMA_BASE_URL: string;
   OLLAMA_MODEL: string;
-  NEXT_PUBLIC_REPORT_MODE: 'light' | 'deep';
+  REPORT_MODE: 'light' | 'deep';
 }
 
 const DEFAULTS: FormState = {
@@ -33,7 +33,10 @@ const DEFAULTS: FormState = {
   GPT4O_DEPLOYMENT: 'gpt-4o',
   OLLAMA_BASE_URL: 'http://localhost:11434',
   OLLAMA_MODEL: 'qwen2.5vl',
-  NEXT_PUBLIC_REPORT_MODE: 'light',
+  // Placeholder only — GET /api/settings returns the mode actually in effect
+  // (which differs between the desktop app and a web deployment) and that value
+  // replaces this before the dialog renders.
+  REPORT_MODE: 'light',
 };
 
 export function SettingsDialog() {
@@ -60,7 +63,9 @@ export function SettingsDialog() {
         GPT4O_DEPLOYMENT: settings.GPT4O_DEPLOYMENT || 'gpt-4o',
         OLLAMA_BASE_URL: settings.OLLAMA_BASE_URL || 'http://localhost:11434',
         OLLAMA_MODEL: settings.OLLAMA_MODEL || 'qwen2.5vl',
-        NEXT_PUBLIC_REPORT_MODE: ((settings.NEXT_PUBLIC_REPORT_MODE || 'light') as 'light' | 'deep'),
+        REPORT_MODE: (settings.REPORT_MODE === 'deep' ? 'deep' : 'light') as
+          | 'light'
+          | 'deep',
       });
     } catch {
       setError('Could not load settings.');
@@ -234,15 +239,15 @@ export function SettingsDialog() {
               <div>
                 <label className={labelCls}>Report Mode</label>
                 <select
-                  value={form.NEXT_PUBLIC_REPORT_MODE}
-                  onChange={e => update('NEXT_PUBLIC_REPORT_MODE', e.target.value)}
+                  value={form.REPORT_MODE}
+                  onChange={e => update('REPORT_MODE', e.target.value)}
                   className={inputCls}
                 >
-                  <option value="light">Light — extract fields locally (fast, no extra AI calls)</option>
                   <option value="deep">Deep — AI reads each document individually (slower, more detail)</option>
+                  <option value="light">Light — extract fields locally (fast, no extra AI calls)</option>
                 </select>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Takes effect after restarting the app.
+                  Applies to the next report you generate — no restart needed.
                 </p>
               </div>
             </fieldset>
