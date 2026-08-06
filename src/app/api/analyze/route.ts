@@ -3,6 +3,7 @@ import { extractText, extractStructuredFromText } from '@/lib/ai-client';
 import {
   enforceBodySize,
   safeErrorResponse,
+  withApiLogging,
   MAX_UPLOAD_BYTES,
 } from '@/lib/api-guard';
 
@@ -16,7 +17,7 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(
       request,
@@ -87,6 +88,8 @@ export async function POST(request: NextRequest) {
       throw fetchError;
     }
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/analyze');
   }
 }
+
+export const POST = withApiLogging('api/analyze', handlePost);

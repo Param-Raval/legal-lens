@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateReport } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 import type { ClassifiedFieldFinding, DocumentSummary, ParsedIntent } from '@/types';
 
 // Allow up to 60s for report generation.
@@ -13,7 +18,7 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -43,6 +48,8 @@ export async function POST(request: NextRequest) {
     const report = await generateReport(summaries, excludedDocuments, familyGraph, parsedIntent, fieldFindings);
     return NextResponse.json(report, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/generate-report');
   }
 }
+
+export const POST = withApiLogging('api/generate-report', handlePost);

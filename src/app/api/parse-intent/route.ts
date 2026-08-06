@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseUserIntent } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 
 // Allow up to 30s — this is a lightweight micro-agent call
 export const maxDuration = 30;
@@ -11,7 +16,7 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -42,6 +47,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(parsedIntent, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/parse-intent');
   }
 }
+
+export const POST = withApiLogging('api/parse-intent', handlePost);

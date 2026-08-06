@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { inferFamilyRelationships } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 
 // Allow up to 60s for relationship inference
 export const maxDuration = 60;
@@ -11,7 +16,7 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -48,6 +53,8 @@ export async function POST(request: NextRequest) {
     const relationships = (result as Record<string, unknown>).relationships ?? [];
     return NextResponse.json({ relationships }, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/infer-relationships');
   }
 }
+
+export const POST = withApiLogging('api/infer-relationships', handlePost);

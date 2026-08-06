@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { translateDocument, translateText } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_UPLOAD_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_UPLOAD_BYTES,
+} from '@/lib/api-guard';
 
 // Allow up to 60s for AI translation processing (Vercel Hobby caps at 60s).
 export const maxDuration = 60;
@@ -11,7 +16,7 @@ const PRIVACY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 } as const;
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_UPLOAD_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -95,6 +100,8 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(result, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/translate');
   }
 }
+
+export const POST = withApiLogging('api/translate', handlePost);

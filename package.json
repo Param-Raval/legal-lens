@@ -19,6 +19,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "format:fix": "prettier --write . && next lint --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test-pipeline": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/test-pipeline.ts",
     "electron:dev": "concurrently -k \"next dev\" \"wait-on http://localhost:3000 && npx tsc -p electron/tsconfig.json && electron .\"",
     "electron:build": "node build/verify-pdf-runtime.mjs && cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build && node build/prepare-standalone.mjs && npx tsc -p electron/tsconfig.json && electron-builder --config electron-builder.yml",
@@ -48,6 +50,7 @@
     "@eslint/eslintrc": "^3",
     "@shadcn/ui": "^0.0.4",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -59,10 +62,12 @@
     "eslint-config-next": "15.5.12",
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-prettier": "^5.5.0",
+    "jsdom": "^30.0.1",
     "prettier": "^3.5.3",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
     "typescript": "^5",
+    "vitest": "^4.1.10",
     "wait-on": "^9.0.4"
   }
 }

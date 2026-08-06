@@ -1,7 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Settings, Check, Loader2, AlertCircle, Trash2 } from 'lucide-react';
+import {
+  Settings,
+  Check,
+  Loader2,
+  AlertCircle,
+  Trash2,
+  FileText,
+  Copy,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { clearResultCache } from '@/lib/result-cache';
 import {
@@ -48,6 +56,10 @@ export function SettingsDialog() {
   const [loading, setLoading] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [cleared, setCleared] = useState(false);
+  const [logText, setLogText] = useState<string | null>(null);
+  const [logPath, setLogPath] = useState<string | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logCopied, setLogCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,6 +124,45 @@ export function SettingsDialog() {
       setError('Failed to clear cached results.');
     } finally {
       setClearing(false);
+    }
+  };
+
+  const loadLogs = async () => {
+    setLogLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/logs');
+      if (!res.ok) throw new Error('Failed to load logs');
+      const data = (await res.json()) as {
+        session?: string;
+        file?: string | null;
+        fileError?: string | null;
+        logPath?: string | null;
+      };
+      // Prefer the file log (it includes the server's stdout since launch);
+      // fall back to this process's in-memory entries (always present in dev).
+      const text =
+        data.file ??
+        data.session ??
+        data.fileError ??
+        'No log output recorded yet.';
+      setLogText(text.trim() ? text : 'No log output recorded yet.');
+      setLogPath(data.logPath ?? null);
+    } catch {
+      setError('Could not load the logs.');
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
+  const copyLogs = async () => {
+    if (!logText) return;
+    try {
+      await navigator.clipboard.writeText(logText);
+      setLogCopied(true);
+      setTimeout(() => setLogCopied(false), 2000);
+    } catch {
+      setError('Could not copy to the clipboard.');
     }
   };
 
@@ -235,7 +286,9 @@ export function SettingsDialog() {
 
             {/* Report Mode */}
             <fieldset className="space-y-2 rounded-md border border-border p-4">
-              <legend className="text-sm font-semibold px-1">Report Generation</legend>
+              <legend className="text-sm font-semibold px-1">
+                Report Generation
+              </legend>
               <div>
                 <label className={labelCls}>Report Mode</label>
                 <select
@@ -243,8 +296,13 @@ export function SettingsDialog() {
                   onChange={e => update('REPORT_MODE', e.target.value)}
                   className={inputCls}
                 >
-                  <option value="deep">Deep — AI reads each document individually (slower, more detail)</option>
-                  <option value="light">Light — extract fields locally (fast, no extra AI calls)</option>
+                  <option value="deep">
+                    Deep — AI reads each document individually (slower, more
+                    detail)
+                  </option>
+                  <option value="light">
+                    Light — extract fields locally (fast, no extra AI calls)
+                  </option>
                 </select>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Applies to the next report you generate — no restart needed.
@@ -254,11 +312,13 @@ export function SettingsDialog() {
 
             {/* Cached results */}
             <fieldset className="space-y-2 rounded-md border border-border p-4">
-              <legend className="text-sm font-semibold px-1">Cached Results</legend>
+              <legend className="text-sm font-semibold px-1">
+                Cached Results
+              </legend>
               <p className="text-xs text-muted-foreground">
-                OCR and translation results are cached in this browser only (never
-                uploaded) so re-analyzing the same document doesn&apos;t make a new
-                AI call. Clear the cache to force a fresh analysis.
+                OCR and translation results are cached in this browser only
+                (never uploaded) so re-analyzing the same document doesn&apos;t
+                make a new AI call. Clear the cache to force a fresh analysis.
               </p>
               <Button
                 variant="outline"
@@ -275,6 +335,55 @@ export function SettingsDialog() {
                 )}
                 {cleared ? 'Cleared' : 'Clear cached results'}
               </Button>
+            </fieldset>
+
+            {/* Diagnostics */}
+            <fieldset className="space-y-2 rounded-md border border-border p-4">
+              <legend className="text-sm font-semibold px-1">
+                Diagnostics
+              </legend>
+              <p className="text-xs text-muted-foreground">
+                When an error message shows a reference code (e.g. “Ref:
+                1a2b3c4d”), the matching entry in this log explains what
+                actually happened. Copy the log when reporting a problem.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadLogs}
+                  disabled={logLoading}
+                >
+                  {logLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <FileText className="h-4 w-4 mr-2" />
+                  )}
+                  {logText === null ? 'Show recent logs' : 'Refresh'}
+                </Button>
+                {logText !== null && (
+                  <Button variant="outline" size="sm" onClick={copyLogs}>
+                    {logCopied ? (
+                      <Check className="h-4 w-4 mr-2" />
+                    ) : (
+                      <Copy className="h-4 w-4 mr-2" />
+                    )}
+                    {logCopied ? 'Copied' : 'Copy all'}
+                  </Button>
+                )}
+              </div>
+              {logText !== null && (
+                <>
+                  <pre className="max-h-48 overflow-auto rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-snug whitespace-pre-wrap break-all">
+                    {logText}
+                  </pre>
+                  {logPath && (
+                    <p className="text-[11px] text-muted-foreground break-all">
+                      Full log file: {logPath}
+                    </p>
+                  )}
+                </>
+              )}
             </fieldset>
 
             {/* Error / success */}

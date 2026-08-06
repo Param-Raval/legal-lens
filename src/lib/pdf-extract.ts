@@ -50,10 +50,12 @@ export async function extractPdfPages(
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as {
       error?: string;
+      reference?: string;
     };
-    throw new Error(
-      body.error ?? `PDF processing failed (HTTP ${response.status})`
-    );
+    const msg = body.error ?? `PDF processing failed (HTTP ${response.status})`;
+    // The reference matches a line in the server log (see api-guard), so keep it
+    // attached to the message the user sees.
+    throw new Error(body.reference ? `${msg} (Ref: ${body.reference})` : msg);
   }
 
   const result = (await response.json()) as {

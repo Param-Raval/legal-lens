@@ -107,11 +107,26 @@ function startServer(
   fs.mkdirSync(outputDir, { recursive: true });
 
   const logPath = path.join(app.getPath('userData'), 'server.log');
-  // Use 'w' to truncate and start fresh each launch — avoids stale content
-  // from prior runs and prevents write failures on Windows when a previous
-  // stream was not cleanly closed (e.g. force-killed process).
+  // Keep exactly one previous launch's log as server.prev.log. Truncating on
+  // every start (the old behaviour) destroyed the evidence in the most common
+  // support case: "it crashed, so I restarted it" — by the time anyone looked,
+  // the crash log was gone. One rotation is enough; unbounded growth is not a
+  // risk because each file covers a single launch.
+  const prevLogPath = path.join(app.getPath('userData'), 'server.prev.log');
+  try {
+    if (fs.existsSync(logPath)) {
+      fs.copyFileSync(logPath, prevLogPath);
+    }
+  } catch {
+    // Rotation is best-effort — never block launch over it.
+  }
+  // 'w' (truncate) for the CURRENT file — avoids stale content and prevents
+  // write failures on Windows when a previous stream was not cleanly closed.
   logStream = fs.createWriteStream(logPath, { flags: 'w' });
   logStream.write(`--- server start ${new Date().toISOString()} ---\n`);
+  logStream.write(
+    `--- app ${app.getVersion()} | electron ${process.versions.electron} | node ${process.versions.node} | ${process.platform}-${process.arch} ---\n`,
+  );
 
   const child = utilityProcess.fork(serverScript, [], {
     env: {

@@ -15,6 +15,7 @@ a short note about it.
 - [Reports](#reports)
 - [Translations](#translations)
 - [Settings](#settings)
+- [Moving to the next client](#moving-to-the-next-client)
 - [Button reference](#button-reference)
 - [Tips and common questions](#tips-and-common-questions)
 
@@ -263,17 +264,39 @@ The gear icon in the top right:
 - **AI Provider** — Azure OpenAI (GPT-4o), or a local Ollama server. Each has its own
   fields: endpoint, key, and deployment/model name. Your API key is never displayed back to
   you; once saved it shows as dots, and saving again without retyping it leaves it alone.
+  **Saved changes apply immediately** — the very next analysis uses the new key or
+  endpoint, no restart needed.
 - **Report Mode** — Deep or Light, described above.
 - **Cached results** — the app remembers the reading and translation of every document it
   has processed, stored in this browser only and never uploaded. That's why re-running a
   case is instant and doesn't cost anything the second time. **Clear cached results** wipes
   that memory and forces a genuinely fresh read next time. Use it if you suspect a stale
   result, or before handing the machine to someone else.
+- **Diagnostics** — shows the app's recent activity log, with a copy button. When an error
+  message includes a reference code (e.g. _Ref: 1a2b3c4d_), the matching entry here says
+  what actually happened — copy the log when reporting a problem.
 
 The **?** button next to the gear replays the guided tour of the interface. It runs
 automatically the first time the app is opened.
 
 The moon/sun button switches between dark and light appearance.
+
+---
+
+## Moving to the next client
+
+The **New Client** button (circular arrow, top right) clears the whole session in one
+click: documents, results, the report, family members and relationships, the analysis
+context, and the client name. You get a fresh workspace without closing and reopening the
+app.
+
+- If anything is loaded, the app asks for confirmation first — so a stray click can't
+  throw away work. Download the report before resetting if you still need it.
+- Anything still running is stopped cleanly.
+- Two things deliberately survive: the **Family Mode toggle** (a preference, not client
+  data) and the **cached results** (they're matched to each document's exact content, so a
+  new client's files can never pick up an old client's results — and keeping the cache
+  means re-analyzing a returning client's document stays free).
 
 ---
 
@@ -306,13 +329,14 @@ The moon/sun button switches between dark and light appearance.
 
 ### Upload area and header
 
-| Button               | What it does                             |
-| -------------------- | ---------------------------------------- |
-| **Choose Files**     | Pick individual documents                |
-| **Choose Folder**    | Upload a folder, including subfolders    |
-| **Settings** (⚙️)    | AI provider, report mode, cached results |
-| **Guided tour** (?)  | Replay the walkthrough of the interface  |
-| **Theme** (moon/sun) | Switch dark / light appearance           |
+| Button                          | What it does                                                        |
+| ------------------------------- | ------------------------------------------------------------------- |
+| **Choose Files**                | Pick individual documents                                           |
+| **Choose Folder**               | Upload a folder, including subfolders                               |
+| **New Client** (circular arrow) | Clear the whole session for the next client (asks for confirmation) |
+| **Settings** (⚙️)               | AI provider, report mode, cached results, diagnostics log           |
+| **Guided tour** (?)             | Replay the walkthrough of the interface                             |
+| **Theme** (moon/sun)            | Switch dark / light appearance                                      |
 
 ---
 
@@ -333,6 +357,9 @@ want a fresh read, clear the cache in Settings first.
 
 **Turn on Family Mode for any case with more than one person.** Without it, cross-person
 comparisons — usually the whole point — aren't available.
+
+**Finished with a client?** Use the **New Client** button (top right) instead of closing
+and reopening the app — it clears everything in one confirmed click.
 
 **Something failed midway.** Nothing already completed is lost. Fix the cause and re-run;
 the cache means finished documents aren't paid for twice.

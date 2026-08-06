@@ -152,6 +152,22 @@ const INTER_REQUEST_DELAY_MS = 2000;
 /** OCR requests fired concurrently per batch; cooldown applied between batches (was 1). */
 const PIPELINE_OCR_BATCH_SIZE = 2;
 
+/**
+ * Build a user-facing message from an API error response.
+ *
+ * The server (src/lib/api-guard.ts safeErrorResponse) returns
+ * { error, kind, reference, retryable } — the reference is the id stamped on the
+ * matching server-log line, so appending it here is what lets a user report an
+ * error the operator can actually find.
+ */
+function apiErrorMessage(data: unknown, fallback: string): string {
+  const d = (data ?? {}) as { error?: unknown; reference?: unknown };
+  const msg = typeof d.error === 'string' && d.error ? d.error : fallback;
+  return typeof d.reference === 'string' && d.reference
+    ? `${msg} (Ref: ${d.reference})`
+    : msg;
+}
+
 const WORD_NAMESPACE =
   'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
@@ -878,7 +894,7 @@ export const useFiles = () => {
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Relationship inference failed');
+        throw new Error(apiErrorMessage(data, 'Relationship inference failed'));
       }
 
       const result = await response.json();
@@ -953,7 +969,7 @@ export const useFiles = () => {
           );
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
-            throw new Error(data.error || 'Analysis failed');
+            throw new Error(apiErrorMessage(data, 'Analysis failed'));
           }
           const groupAnalysis = (await response.json()) as OCRResult;
           if (leadFile)
@@ -1001,7 +1017,7 @@ export const useFiles = () => {
 
             if (!response.ok) {
               const data = await response.json().catch(() => ({}));
-              throw new Error(data.error || 'Analysis failed');
+              throw new Error(apiErrorMessage(data, 'Analysis failed'));
             }
 
             analysis = await response.json();
@@ -1109,7 +1125,7 @@ export const useFiles = () => {
             if (!response.ok) {
               const data = await response.json().catch(() => ({}));
               throw new Error(
-                data.error || `Analysis failed for ${files[index].name}`
+                apiErrorMessage(data, `Analysis failed for ${files[index].name}`)
               );
             }
 
@@ -1265,7 +1281,7 @@ export const useFiles = () => {
             );
             if (!response.ok) {
               const data = await response.json().catch(() => ({}));
-              throw new Error(data.error || `Analysis failed for ${files[index].name}`);
+              throw new Error(apiErrorMessage(data, `Analysis failed for ${files[index].name}`));
             }
             const analysis = await response.json() as OCRResult;
             void setCachedOcr(files[index].file, files[index].languageHint, analysis);
@@ -1358,7 +1374,7 @@ export const useFiles = () => {
             );
             if (!response.ok) {
               const data = await response.json().catch(() => ({}));
-              throw new Error(data.error || `Translation failed for ${latestFiles[index].name}`);
+              throw new Error(apiErrorMessage(data, `Translation failed for ${latestFiles[index].name}`));
             }
             const translation = await response.json() as TranslationResult;
             void setCachedTranslation(latestFiles[index].file, 'en', latestFiles[index].languageHint, translation);
@@ -1582,7 +1598,7 @@ export const useFiles = () => {
 
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
-            throw new Error(data.error || 'Translation failed');
+            throw new Error(apiErrorMessage(data, 'Translation failed'));
           }
 
           translation = await response.json();
@@ -1666,7 +1682,7 @@ export const useFiles = () => {
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
             throw new Error(
-              data.error || `Translation failed for ${files[index].name}`
+              apiErrorMessage(data, `Translation failed for ${files[index].name}`)
             );
           }
 
@@ -1758,7 +1774,7 @@ export const useFiles = () => {
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Discrepancy check failed');
+        throw new Error(apiErrorMessage(data, 'Discrepancy check failed'));
       }
 
       const result = await response.json();
@@ -1868,7 +1884,7 @@ export const useFiles = () => {
             if (!resp.ok) {
               const data = await resp.json().catch(() => ({}));
               throw new Error(
-                data.error || `Document analysis failed for ${g.name}`
+                apiErrorMessage(data, `Document analysis failed for ${g.name}`)
               );
             }
             const s = (await resp.json()) as DocumentSummary;
@@ -1979,7 +1995,7 @@ export const useFiles = () => {
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Report generation failed');
+        throw new Error(apiErrorMessage(data, 'Report generation failed'));
       }
 
       const reportData: AnalysisReport = await response.json();
@@ -2075,7 +2091,7 @@ export const useFiles = () => {
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
             throw new Error(
-              data.error || `Translation failed for ${files[index].name}`
+              apiErrorMessage(data, `Translation failed for ${files[index].name}`)
             );
           }
 
@@ -2147,6 +2163,49 @@ export const useFiles = () => {
     );
   }, []);
 
+  /**
+   * Reset the whole session for a new client: abort anything in flight, then
+   * clear every piece of per-client state — files, results, report, family
+   * members/relationships, analysis context, errors, progress.
+   *
+   * Deliberately NOT reset:
+   *  - the Family Mode toggle — a user preference (persisted in localStorage),
+   *    not client data; staff who work family cases keep it on;
+   *  - the IndexedDB result cache — content-addressed per document, so a new
+   *    client's documents can never hit an old client's entries, and clearing
+   *    it would just re-bill any legitimately re-analyzed document (it can be
+   *    cleared explicitly in Settings);
+   *  - provider settings (.env) — server-side configuration, not client state.
+   */
+  const resetForNewClient = useCallback(() => {
+    // Abort in-flight work first so a late response can't repopulate the
+    // state cleared below.
+    abortRef.current?.abort();
+    abortRef.current = null;
+
+    setFiles([]);
+    setSelectedIndex(-1);
+    setIsAnalyzing(null);
+    setIsTranslating(null);
+    setIsPdfExtracting(false);
+    setDiscrepancyCheck({
+      hasDiscrepancies: false,
+      summary: '',
+      isChecking: false,
+    });
+    setReport(null);
+    setIsGeneratingReport(false);
+    setClientName('Client');
+    setError('');
+    setPipeline({ stage: 'idle', percent: 0, message: '' });
+    setFamilyGraph({ members: [], relationships: [] });
+    setIsInferringRelationships(false);
+    setInferStatus(null);
+    setAnalysisContext('');
+    setParsedIntent(null);
+    setIsParsingIntent(false);
+  }, []);
+
   return {
     files,
     selectedIndex,
@@ -2201,5 +2260,6 @@ export const useFiles = () => {
     parsedIntent,
     isParsingIntent,
     updateFileNotes,
+    resetForNewClient,
   };
 };

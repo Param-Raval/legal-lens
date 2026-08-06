@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeDocumentDeep } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 import type { DocumentGroup } from '@/types';
 
 // Allow up to 60s per document in deep analysis mode.
@@ -19,7 +24,7 @@ const PRIVACY_HEADERS = {
  * Accepts a single DocumentGroup, returns a compact DocumentSummary.
  * The client calls this in parallel for each document when REPORT_MODE=deep.
  */
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -44,6 +49,8 @@ export async function POST(request: NextRequest) {
     const summary = await analyzeDocumentDeep(group);
     return NextResponse.json(summary, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/analyze-document-report');
   }
 }
+
+export const POST = withApiLogging('api/analyze-document-report', handlePost);

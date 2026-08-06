@@ -1,8 +1,23 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FileText, HelpCircle, Moon, Sun, StickyNote } from 'lucide-react';
+import {
+  FileText,
+  HelpCircle,
+  Moon,
+  Sun,
+  StickyNote,
+  RotateCcw,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import { useFiles } from '@/hooks/useFiles';
 import { startTour, maybeAutoStartTour } from '@/lib/tour';
 import {
@@ -67,10 +82,22 @@ export default function Home() {
     setAnalysisContext,
     updateFileNotes,
     removeFile,
+    resetForNewClient,
   } = useFiles();
 
   const [showReport, setShowReport] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  const [showNewClientConfirm, setShowNewClientConfirm] = useState(false);
+
+  // Anything worth a confirmation prompt? An empty session resets silently.
+  const hasSessionData =
+    files.length > 0 || report !== null || analysisContext.trim() !== '';
+
+  const startNewClient = () => {
+    resetForNewClient();
+    setShowReport(false);
+    setShowNewClientConfirm(false);
+  };
 
   useEffect(() => {
     const stored = localStorage.getItem('theme');
@@ -118,6 +145,20 @@ export default function Home() {
               <Button
                 variant="outline"
                 size="sm"
+                onClick={() =>
+                  hasSessionData
+                    ? setShowNewClientConfirm(true)
+                    : startNewClient()
+                }
+                className="h-9 w-9 p-0"
+                title="New client — clear all documents and results"
+                data-tour="new-client"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => startTour()}
                 className="h-9 w-9 p-0"
                 title="Show guided tour"
@@ -132,7 +173,9 @@ export default function Home() {
                 size="sm"
                 onClick={toggleDarkMode}
                 className="h-9 w-9 p-0"
-                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={
+                  darkMode ? 'Switch to light mode' : 'Switch to dark mode'
+                }
                 data-tour="theme-toggle"
               >
                 {darkMode ? (
@@ -186,22 +229,22 @@ export default function Home() {
         {/* File List (wrapper is a tour anchor; keep it out of the DOM when
             FileList renders nothing so it can't affect layout) */}
         {files.length > 0 && (
-        <div data-tour="file-list">
-        <FileList
-          files={files}
-          isAnalyzing={isAnalyzing}
-          isTranslating={isTranslating}
-          onView={selectFile}
-          onAnalyze={analyzeFile}
-          onTranslate={translateFile}
-          onSetLanguage={setFileLanguage}
-          onRemove={removeFile}
-          familyModeEnabled={familyModeEnabled}
-          familyMembers={familyGraph.members}
-          onAssignMember={assignDocumentToMember}
-          onUpdateFileNotes={updateFileNotes}
-        />
-        </div>
+          <div data-tour="file-list">
+            <FileList
+              files={files}
+              isAnalyzing={isAnalyzing}
+              isTranslating={isTranslating}
+              onView={selectFile}
+              onAnalyze={analyzeFile}
+              onTranslate={translateFile}
+              onSetLanguage={setFileLanguage}
+              onRemove={removeFile}
+              familyModeEnabled={familyModeEnabled}
+              familyMembers={familyGraph.members}
+              onAssignMember={assignDocumentToMember}
+              onUpdateFileNotes={updateFileNotes}
+            />
+          </div>
         )}
 
         {/* Analysis Context */}
@@ -209,7 +252,9 @@ export default function Home() {
           <div className="space-y-2" data-tour="analysis-context">
             <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <StickyNote className="h-4 w-4" />
-              <span>Analysis context <span className="font-normal">(optional)</span></span>
+              <span>
+                Analysis context <span className="font-normal">(optional)</span>
+              </span>
             </div>
             <textarea
               value={analysisContext}
@@ -273,6 +318,35 @@ export default function Home() {
         hasNext={selectedIndex < files.length - 1}
         hasPrev={selectedIndex > 0}
       />
+
+      {/* New client confirmation */}
+      <Dialog
+        open={showNewClientConfirm}
+        onOpenChange={setShowNewClientConfirm}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Start a new client?</DialogTitle>
+            <DialogDescription>
+              This clears everything in the current session — uploaded
+              documents, analysis results, the report, family members, and the
+              analysis context. Download the report first if you still need it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowNewClientConfirm(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={startNewClient}>
+              <RotateCcw className="h-4 w-4 mr-2" />
+              Start new client
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Report Viewer */}
       {showReport && report && (

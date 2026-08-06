@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { withApiLogging } from '@/lib/api-guard';
 import { resolveReportMode } from '@/lib/report-mode';
 
 // Must be evaluated per request, never prerendered at build time — resolving the
@@ -13,9 +14,10 @@ export const dynamic = 'force-dynamic';
  * a restart. The response carries no secrets — just which of the two pipeline
  * shapes to run.
  */
-export async function GET() {
+export const GET = withApiLogging('api/report-mode', async () => {
+  const mode = resolveReportMode();
   return NextResponse.json(
-    { mode: resolveReportMode() },
+    { mode },
     { headers: { 'Cache-Control': 'no-store' } }
   );
-}
+});

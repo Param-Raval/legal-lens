@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkDiscrepancies } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 import type { ParsedIntent } from '@/types';
 import { z } from 'zod';
 
@@ -34,7 +39,7 @@ const DiscrepancySchema = z.object({
   classificationFailed: z.boolean().optional(),
 });
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -68,6 +73,8 @@ export async function POST(request: NextRequest) {
     const validatedResponse = DiscrepancySchema.parse(result);
     return NextResponse.json(validatedResponse, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/analyze-discrepancies');
   }
 }
+
+export const POST = withApiLogging('api/analyze-discrepancies', handlePost);

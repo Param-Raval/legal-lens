@@ -4,6 +4,8 @@
  */
 import { getConfig, validateConfig } from './config';
 import { matchDocTypeSpec } from './document-types';
+import { describeError, log, logRuntimeOnce } from './logger';
+import { ProviderHttpError, readProviderError } from './provider-error';
 import type {
   AnalysisReport,
   ClassifiedFieldFinding,
@@ -925,6 +927,10 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
 
   const cfg = getConfig();
 
+  // Emits the runtime snapshot on the first provider call of the process — the
+  // context needed to tell a packaged-app problem from a configuration one.
+  logRuntimeOnce();
+
   const body: Record<string, unknown> = {
     model: cfg.openai.model,
     messages: [{ role: 'system', content: system }, ...messages],
@@ -955,14 +961,21 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
         (err.name === 'TimeoutError' || err.name === 'AbortError');
       // Surface the true underlying cause (undici hides it behind a generic
       // "fetch failed"); without this the operator only sees our wrapper.
-      const cause = (err as { cause?: unknown }).cause;
-      const detail =
-        err instanceof Error
-          ? `${err.name}: ${err.message}${cause instanceof Error ? ` (cause ${cause.name}: ${cause.message}${(cause as { code?: string }).code ? ` [${(cause as { code?: string }).code}]` : ''})` : ''}`
-          : String(err);
-      console.error(
-        `[openaiChat:${label}] attempt ${attempt} failed — ${detail}`
-      );
+      log.error('openaiChat', 'request could not reach the provider', {
+        label,
+        attempt,
+        timedOut,
+        timeoutMs: PER_CALL_TIMEOUT_MS,
+        willRetry: attempt < MAX_RETRIES,
+        endpointHost: (() => {
+          try {
+            return new URL(cfg.openai.baseUrl).host;
+          } catch {
+            return null;
+          }
+        })(),
+        ...describeError(err),
+      });
       lastError = new Error(
         timedOut
           ? 'OpenAI request timed out. Please try again.'
@@ -997,21 +1010,42 @@ async function openaiChat(opts: ChatOptions): Promise<Record<string, unknown>> {
     }
 
     if (!response.ok) {
-      // Only include the HTTP status in the error — NEVER surface the raw
-      // response body, which could echo back parts of the request containing
-      // sensitive document content (PII).
-      lastError = new Error(
-        `OpenAI API error ${response.status}. Please try again.`
+      // Read only the provider's own error code/message (see readProviderError)
+      // — never the raw body, which could echo back request content (PII).
+      const { code, message } = await readProviderError(response);
+      const httpError = new ProviderHttpError(
+        'openai',
+        response.status,
+        code,
+        message
       );
-      // Retry on 5xx server errors
+      lastError = httpError;
+
+      log.error('openaiChat', 'provider returned an error status', {
+        label,
+        status: response.status,
+        providerCode: code,
+        providerMessage: message,
+        endpointHost: (() => {
+          try {
+            return new URL(cfg.openai.baseUrl).host;
+          } catch {
+            return null;
+          }
+        })(),
+        deployment: cfg.openai.model,
+        attempt,
+        willRetry: response.status >= 500 && attempt < MAX_RETRIES,
+      });
+
+      // Retry on 5xx server errors only. A 401/403/404/400 is a configuration
+      // problem — the same request will fail identically every time, so retrying
+      // just delays the real error by the full backoff.
       if (response.status >= 500 && attempt < MAX_RETRIES) {
-        console.warn(
-          `[WARN] Server error (${response.status}). Retry ${attempt + 1}/${MAX_RETRIES}...`
-        );
         await sleep(backoffMs(attempt));
         continue;
       }
-      throw lastError;
+      throw httpError;
     }
 
     const result = await response.json();
@@ -1082,14 +1116,41 @@ async function ollamaGenerate(opts: {
   if (opts.images) body.images = opts.images;
 
   const cfg = getConfig();
-  const response = await fetch(`${cfg.ollama.baseUrl}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
-  });
+  logRuntimeOnce();
 
-  if (!response.ok) throw new Error(`Ollama API error: ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(`${cfg.ollama.baseUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // A local Ollama that isn't running is the single most common failure here;
+    // the connection-refused cause is what identifies it.
+    log.error('ollamaGenerate', 'request could not reach Ollama', {
+      model: opts.model,
+      baseUrl: cfg.ollama.baseUrl,
+      ...describeError(err),
+    });
+    throw new Error(
+      'Could not reach the Ollama server. Check that it is running and that the base URL in Settings is correct.',
+      { cause: err }
+    );
+  }
+
+  if (!response.ok) {
+    const { code, message } = await readProviderError(response);
+    log.error('ollamaGenerate', 'Ollama returned an error status', {
+      model: opts.model,
+      baseUrl: cfg.ollama.baseUrl,
+      status: response.status,
+      providerCode: code,
+      providerMessage: message,
+    });
+    throw new ProviderHttpError('ollama', response.status, code, message);
+  }
 
   const result = await response.json();
   // Match the OpenAI path's resilience: guard empty output and repair/validate

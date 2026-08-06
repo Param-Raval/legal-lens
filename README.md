@@ -31,6 +31,7 @@ It ships in two forms from the same codebase:
   - [What the build actually does](#what-the-build-actually-does)
   - [Build troubleshooting](#build-troubleshooting)
 - [Data privacy and security](#data-privacy-and-security)
+- [Testing](#testing)
 - [CLI test pipeline](#cli-test-pipeline)
 - [Known limitations](#known-limitations)
 - [Further reading](#further-reading)
@@ -142,6 +143,7 @@ pnpm electron:dev   # same dev server, wrapped in the Electron window
 | `pnpm start`                        | Serve the production build                                                                                               |
 | `pnpm lint` / `pnpm lint:fix`       | ESLint                                                                                                                   |
 | `pnpm format` / `pnpm format:check` | Prettier                                                                                                                 |
+| `pnpm test` / `pnpm test:watch`     | Vitest suite — see [Testing](#testing)                                                                                   |
 | `pnpm verify:pdf-runtime`           | Fail fast if the PDF rendering prerequisites are missing                                                                 |
 | `pnpm test-pipeline`                | Run the whole AI pipeline over local sample files, no browser                                                            |
 | `pnpm electron:dev`                 | Electron shell against the dev server                                                                                    |
@@ -284,11 +286,45 @@ The packaged app is not a static export — it ships a real Next.js server:
    is actually our server (via `X-Frame-Options`/`X-Powered-By`) rather than some other
    app squatting the port, then opens the window.
 5. Server stdout/stderr are mirrored to `<userData>/server.log` — **the first place to
-   look when the packaged app misbehaves.**
+   look when the packaged app misbehaves.** The previous launch's log is kept as
+   `server.prev.log`, so "it crashed, so I restarted it" no longer destroys the evidence.
 
 A single-instance lock prevents duplicate launches, the default menu is removed on
 Windows (so staff can't force-reload mid-analysis), external links open in the system
 browser, and a post-boot server crash raises a Restart/Quit dialog.
+
+### Logging and error reporting
+
+Server-side logging lives in [src/lib/logger.ts](src/lib/logger.ts): timestamped,
+levelled (`LOG_LEVEL` env var; `debug` in dev, `info` in production), and scoped per
+route via the `withApiLogging` wrapper in [api-guard.ts](src/lib/api-guard.ts) — every
+API request gets a start line and a finish line with status and duration. Two sinks:
+stdout/stderr (→ `server.log` in Electron, function logs on Vercel) and an in-memory
+ring buffer served by `GET /api/logs` for the **Settings → Diagnostics** panel, which
+works even in `pnpm dev` where no log file exists.
+
+Failed requests return a structured body:
+
+```json
+{
+  "error": "…what happened and what to do…",
+  "kind": "provider_auth",
+  "reference": "ea1d72d3",
+  "retryable": false
+}
+```
+
+`reference` is stamped on the matching server-log line (`ref=ea1d72d3`), so an error a
+user reads out can be matched to the exact failure. Errors are classified in
+[api-guard.ts](src/lib/api-guard.ts) — provider auth failures (401/403) name the problem
+and point at Settings instead of saying "try again"; provider HTTP errors carry the
+provider's own platform message (never request content — see
+[provider-error.ts](src/lib/provider-error.ts)); `ReferenceError`s and missing modules
+are reported as build/installation problems rather than being blamed on the document.
+
+Secrets are scrubbed from every log line (`redact()` removes any occurrence of
+`GPT4O_API_KEY`'s value), and document text/fields are never logged — only sizes,
+counts, durations, and provider metadata.
 
 ---
 
@@ -559,6 +595,30 @@ runtime. The project's `output/` directory is removed from the standalone tree b
   context can't break out into instructions.
 
 ---
+
+## Testing
+
+```bash
+pnpm test          # run the vitest suite once
+pnpm test:watch    # watch mode
+```
+
+Tests live in `tests/` (config: [vitest.config.mts](vitest.config.mts), node
+environment, `@/` alias mirrors tsconfig). They import the real production modules —
+including actual route handlers called with real `NextRequest`s — not mocks of them.
+What's pinned, and the regression each suite exists to catch:
+
+| Suite                                       | Guards against                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pdf-canvas-globals.test.ts`                | The packaged-app PDF failure: pdfjs's own Node polyfills are disabled inside Electron's utilityProcess, so `ensureCanvasGlobals()` must register `Path2D`/`ImageData`/`DOMMatrix`/… itself. Wipes the globals and asserts every one comes back. This exact regression shipped once (commit `5e0c915` dropped two of the assignments) — dev kept working, only the installer broke. |
+| `pdf-pages-route.test.ts`                   | End-to-end render of a real sample PDF through the actual route handler: page JPEGs, page cap, truncation flag, and structured errors for corrupt bytes.                                                                                                                                                                                                                           |
+| `report-mode.test.ts`                       | Report mode must be resolved server-side at call time (desktop → `deep`, web → `light`, legacy key honoured) — never frozen at build time.                                                                                                                                                                                                                                         |
+| `settings-route.test.ts`                    | `.env` handling: key masking, placeholder detection, the legacy-key migration, operator-key preservation, loopback/CSRF guards, validation, Vercel lockout. Runs against a temp `CONFIG_DIR`.                                                                                                                                                                                      |
+| `api-guard.test.ts`                         | Error classification: a 401 must say "check Settings" and be non-retryable, 429 keeps the `isRateLimit` contract, `ReferenceError` reads as a broken build, and no internal message leaks through the fallback.                                                                                                                                                                    |
+| `logger.test.ts` / `provider-error.test.ts` | Secrets never reach a log line; provider error bodies are mined for code/message only, never forwarded wholesale.                                                                                                                                                                                                                                                                  |
+
+The PDF end-to-end tests use `sample_docs/i-589 filled.pdf`, which is gitignored — they
+skip (not fail) on a clone without it. CI runs the suite before every desktop build.
 
 ## CLI test pipeline
 

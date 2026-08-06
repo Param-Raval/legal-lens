@@ -79,11 +79,19 @@ const STEP_CATALOGUE: DriveStep[] = [
     },
   },
   {
+    element: '[data-tour="new-client"]',
+    popover: {
+      title: 'New client',
+      description:
+        'Clears the whole session — documents, results, report, family members — so you can start the next client without restarting the app. Asks for confirmation first.',
+    },
+  },
+  {
     element: '[data-tour="settings"]',
     popover: {
       title: 'Settings',
       description:
-        'Configure the AI provider and API key, and clear cached results.',
+        'Configure the AI provider and API key, and clear cached results. Saved changes apply immediately — no restart needed.',
     },
   },
   {
@@ -100,9 +108,7 @@ const STEP_CATALOGUE: DriveStep[] = [
  *  (an empty block div still has width, so height must be checked too). */
 function isVisible(selector: string): boolean {
   const el = document.querySelector(selector);
-  return (
-    el instanceof HTMLElement && el.offsetWidth > 0 && el.offsetHeight > 0
-  );
+  return el instanceof HTMLElement && el.offsetWidth > 0 && el.offsetHeight > 0;
 }
 
 /** Start the tour over whatever is currently on screen. */

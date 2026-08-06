@@ -5,8 +5,10 @@ import { pathToFileURL } from 'url';
 import {
   enforceBodySize,
   safeErrorResponse,
+  withApiLogging,
   MAX_UPLOAD_BYTES,
 } from '@/lib/api-guard';
+import { ensureCanvasGlobals } from '@/lib/pdf-canvas-globals';
 
 // Allow up to 60s for multi-page PDF rendering (25 pages at 1.5x scale needs room).
 export const maxDuration = 60;
@@ -105,7 +107,7 @@ function extractWidgetLines(annotations: any[]): string[] {
   return lines;
 }
 
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(
       request,
@@ -153,32 +155,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Register DOM geometry globals BEFORE importing pdfjs ──────────────
-    // pdfjs executes `const SCALE_MATRIX = new DOMMatrix()` at module evaluation
-    // time — not lazily. DOMMatrix must be on globalThis before the import() call.
-    //
-    // Two-step to survive both Electron and Vercel:
-    //
-    // Step 1: pure-JS polyfill from @napi-rs/canvas/geometry.js.
-    //   geometry.js is a vendored polyfill with no native binary dependency. It IS
-    //   traced into the Vercel function bundle (visible in .nft.json). This gives
-    //   DOMMatrix/DOMPoint/DOMRect on any platform without the native addon.
-    //
-    // Step 2: native canvas (@napi-rs/canvas) for page rendering.
-    //   Needs a platform-specific .node binary. Available in Electron (bundled by
-    //   prepare-standalone.mjs) and on Vercel Linux (installed via `current` arch
-    //   in pnpm-workspace.yaml supportedArchitectures). If somehow unavailable, the
-    //   fallback from step 1 is still in place so pdfjs doesn't crash on load.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const _geom = require('@napi-rs/canvas/geometry.js') as Record<string, unknown>;
-    const _g = globalThis as Record<string, unknown>;
-    if (!_g.DOMMatrix) _g.DOMMatrix = _geom.DOMMatrix;
-    if (!_g.DOMPoint) _g.DOMPoint = _geom.DOMPoint;
-    if (!_g.DOMRect) _g.DOMRect = _geom.DOMRect;
-
-    // Native canvas — needed for createCanvas (page rendering). Import after the
-    // globals are set so pdfjs can evaluate safely even if this import is slow.
-    const { createCanvas } = await import('@napi-rs/canvas');
+    // ── Register the DOM globals pdfjs needs BEFORE importing pdfjs ────────
+    // pdfjs's own Node polyfills (Path2D/ImageData/DOMMatrix) are disabled inside
+    // Electron's utilityProcess — the packaged app's exact environment — so they
+    // must all be supplied here. Full story and the regression it guards against:
+    // src/lib/pdf-canvas-globals.ts. MUST be awaited before the pdfjs import
+    // below, because pdf.mjs evaluates `new DOMMatrix()` at module level.
+    const { createCanvas } = await ensureCanvasGlobals();
 
     // ── Load pdfjs-dist legacy build (Node.js compatible) ───────────────
     const _pdfjsWorkerCandidates = [
@@ -217,7 +200,8 @@ export async function POST(request: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const _cc = createCanvas as (w: number, h: number) => any;
     class NodeCanvasFactory {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // pdfjs passes {ownerDocument} — accepted and deliberately ignored.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
       constructor(_opts?: any) {}
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       create(width: number, height: number): { canvas: any; context: any } {
@@ -392,6 +376,8 @@ export async function POST(request: NextRequest) {
       console.warn = origWarn;
     }
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/pdf-pages');
   }
 }
+
+export const POST = withApiLogging('api/pdf-pages', handlePost);

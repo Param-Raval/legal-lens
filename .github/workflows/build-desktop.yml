@@ -43,6 +43,12 @@ jobs:
       - name: Verify PDF runtime prerequisites
         run: pnpm run verify:pdf-runtime
 
+      # Unit + integration tests. The PDF end-to-end tests self-skip here
+      # (sample_docs is gitignored), but the canvas-globals regression test —
+      # the one that catches the packaged-app Path2D failure — always runs.
+      - name: Run tests
+        run: pnpm test
+
       - name: Build Next.js standalone
         run: npx cross-env NEXT_PUBLIC_ENABLE_SAVE=true next build
 

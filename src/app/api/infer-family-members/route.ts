@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { inferFamilyMembers } from '@/lib/ai-client';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 
 // Allow up to 30s for family member inference.
 export const maxDuration = 30;
@@ -18,7 +23,7 @@ const PRIVACY_HEADERS = {
  * Called during the pipeline when family mode is enabled but no members have been manually added.
  * Returns array of inferred FamilyMember objects with assigned colors.
  */
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const tooLarge = enforceBodySize(request, MAX_JSON_BYTES, PRIVACY_HEADERS);
     if (tooLarge) return tooLarge;
@@ -44,6 +49,8 @@ export async function POST(request: NextRequest) {
     const result = await inferFamilyMembers(documents);
     return NextResponse.json(result, { headers: PRIVACY_HEADERS });
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/infer-family-members');
   }
 }
+
+export const POST = withApiLogging('api/infer-family-members', handlePost);

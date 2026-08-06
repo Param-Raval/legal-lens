@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { enforceBodySize, safeErrorResponse, MAX_JSON_BYTES } from '@/lib/api-guard';
+import {
+  enforceBodySize,
+  safeErrorResponse,
+  withApiLogging,
+  MAX_JSON_BYTES,
+} from '@/lib/api-guard';
 
 // On Vercel the project directory is read-only; use /tmp for ephemeral writes.
 const isVercel = !!process.env.VERCEL;
@@ -31,7 +36,7 @@ const PRIVACY_HEADERS = {
  *   translation?: TranslationResult
  * }
  */
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     // Reject immediately in production – the client should not be calling this
     // endpoint outside of local development, but guard server-side too so that
@@ -175,6 +180,8 @@ export async function POST(request: NextRequest) {
       { headers: PRIVACY_HEADERS }
     );
   } catch (error) {
-    return safeErrorResponse(error, PRIVACY_HEADERS);
+    return safeErrorResponse(error, PRIVACY_HEADERS, 'api/save-results');
   }
 }
+
+export const POST = withApiLogging('api/save-results', handlePost);
